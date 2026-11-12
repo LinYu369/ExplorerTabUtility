@@ -12,5 +12,8 @@ internal static class Constants
 
     // Maximum time between two clicks for them to be treated as a double-click.
     internal const int DoubleClickIntervalMs = 400;
+
+    // Maximum cursor movement (in physical pixels) between two clicks for them to be treated as a double-click.
+    internal const int DoubleClickMaxMovePx = 8;
     internal const string DefaultHotKeyProfiles = "[{\"Name\":\"Home\",\"HotKeys\":[91,69],\"Scope\":0,\"Action\":0,\"Path\":\"\",\"IsHandled\":true,\"IsEnabled\":true,\"Delay\":0},{\"Name\":\"Duplicate\",\"HotKeys\":[17,68],\"Scope\":1,\"Action\":1,\"Path\":null,\"IsHandled\":true,\"IsEnabled\":true,\"Delay\":0},{\"Name\":\"ReopenClosed\",\"HotKeys\":[16,17,84],\"Scope\":1,\"Action\":2,\"Path\":null,\"IsHandled\":true,\"IsEnabled\":true,\"Delay\":0}]";
 }

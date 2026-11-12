@@ -12,6 +12,7 @@ public sealed class Mouse : IHook
 {
     private int _lastClickTime;
     private Key _lastClickKey;
+    private Point _lastClickPosition;
     private bool _hasLastClick;
     private readonly LowLevelMouseHook _lowLevelMouseHook;
     private readonly IReadOnlyCollection<HotKeyProfile> _hotkeyProfiles;
@@ -33,7 +34,7 @@ public sealed class Mouse : IHook
         var handler = OnHotKeyProfileTriggered;
         if (handler == null) return;
 
-        var isDoubleClick = IsDoubleClick(e.CurrentKey);
+        var isDoubleClick = IsDoubleClick(e.CurrentKey, e.Position);
 
         bool? isFileExplorerForeground = null;
         nint handle = 0;
@@ -76,11 +77,15 @@ public sealed class Mouse : IHook
         }
     }
 
-    private bool IsDoubleClick(Key currentKey)
+    private bool IsDoubleClick(Key currentKey, Point position)
     {
         var now = Environment.TickCount;
 
-        if (_hasLastClick && now - _lastClickTime < Constants.DoubleClickIntervalMs && _lastClickKey == currentKey)
+        if (_hasLastClick
+            && now - _lastClickTime < Constants.DoubleClickIntervalMs
+            && _lastClickKey == currentKey
+            && Math.Abs(position.X - _lastClickPosition.X) <= Constants.DoubleClickMaxMovePx
+            && Math.Abs(position.Y - _lastClickPosition.Y) <= Constants.DoubleClickMaxMovePx)
         {
             // Forget the pair so the third click of a triple-click doesn't trigger the hotkey again.
             _hasLastClick = false;
@@ -90,6 +95,7 @@ public sealed class Mouse : IHook
         _hasLastClick = true;
         _lastClickTime = now;
         _lastClickKey = currentKey;
+        _lastClickPosition = position;
         return false;
     }
 
