@@ -228,7 +228,7 @@ public partial class HotKeyProfileControl : UserControl
         var isDoubleClick = false;
 
         var now = Environment.TickCount;
-        if (now - _lastClickTime < 500 && _lastClickKey == currentKey)
+        if (now - _lastClickTime < Constants.DoubleClickIntervalMs && _lastClickKey == currentKey)
             isDoubleClick = true;
 
         _lastClickTime = now;

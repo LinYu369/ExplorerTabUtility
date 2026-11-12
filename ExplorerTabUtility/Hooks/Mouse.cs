@@ -12,6 +12,7 @@ public sealed class Mouse : IHook
 {
     private int _lastClickTime;
     private Key _lastClickKey;
+    private bool _hasLastClick;
     private readonly LowLevelMouseHook _lowLevelMouseHook;
     private readonly IReadOnlyCollection<HotKeyProfile> _hotkeyProfiles;
     public bool IsHookActive => _lowLevelMouseHook.IsStarted;
@@ -77,15 +78,19 @@ public sealed class Mouse : IHook
 
     private bool IsDoubleClick(Key currentKey)
     {
-        var isDoubleClick = false;
-        
         var now = Environment.TickCount;
-        if (now - _lastClickTime < 500 && _lastClickKey == currentKey)
-            isDoubleClick = true;
-        
+
+        if (_hasLastClick && now - _lastClickTime < Constants.DoubleClickIntervalMs && _lastClickKey == currentKey)
+        {
+            // Forget the pair so the third click of a triple-click doesn't trigger the hotkey again.
+            _hasLastClick = false;
+            return true;
+        }
+
+        _hasLastClick = true;
         _lastClickTime = now;
         _lastClickKey = currentKey;
-        return isDoubleClick;
+        return false;
     }
 
     public void Dispose()
