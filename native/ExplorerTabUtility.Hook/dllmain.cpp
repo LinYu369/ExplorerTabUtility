@@ -47,7 +47,7 @@ namespace
     DestroyWindow_t g_destroyWindow = nullptr;
 
     CRITICAL_SECTION g_trackLock;
-    std::vector<std::pair<HWND, DWORD>> g_tracked; // window, tick of the last-resort reveal
+    std::vector<HWND> g_tracked;
 
     void Log(const char* format, ...)
     {
@@ -76,7 +76,7 @@ namespace
     {
         bool found = false;
         EnterCriticalSection(&g_trackLock);
-        for (const auto& [tracked, until] : g_tracked)
+        for (const HWND tracked : g_tracked)
         {
             if (tracked == hWnd)
             {
@@ -93,7 +93,7 @@ namespace
         EnterCriticalSection(&g_trackLock);
         for (auto it = g_tracked.begin(); it != g_tracked.end(); ++it)
         {
-            if (it->first == hWnd)
+            if (*it == hWnd)
             {
                 g_tracked.erase(it);
                 break;
@@ -188,7 +188,14 @@ namespace
             found = true;
         }
 
-        if (found) Untrack(hWnd);
+        if (found)
+        {
+            Untrack(hWnd);
+            // The window is meant to be used now, so let it take focus again.
+            const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
+            if ((exStyle & WS_EX_NOACTIVATE) != 0)
+                SetWindowLongW(hWnd, GWL_EXSTYLE, exStyle & ~WS_EX_NOACTIVATE);
+        }
         return found;
     }
 
@@ -229,7 +236,7 @@ namespace
                 enabled, ctrlShift, allow, other, hide, (style & WS_VISIBLE) != 0);
 
             if (hide)
-                exStyle |= WS_EX_LAYERED;
+                exStyle |= WS_EX_LAYERED | WS_EX_NOACTIVATE;
         }
 
         const HWND hWnd = g_createWindowExW(exStyle, className, windowName, style, x, y, width,
@@ -241,7 +248,7 @@ namespace
             MakeTransparent(hWnd);
 
             EnterCriticalSection(&g_trackLock);
-            g_tracked.emplace_back(hWnd, GetTickCount() + 10'000);
+            g_tracked.push_back(hWnd);
             LeaveCriticalSection(&g_trackLock);
         }
 
@@ -324,33 +331,29 @@ namespace
         return result;
     }
 
-    // Safety net: if the app dies between window creation and merging, don't leave an invisible
-    // window behind forever. Also catches a show that went through an API we do not hook.
+    // While the app is alive it owns the show/hide decision for every tracked window: it either
+    // merges and quits it, or releases it. The hook must never restore opacity on its own here,
+    // because doing that mid-merge is exactly what flashes a fully opaque window on screen.
+    // Only when the app is gone do we reveal, so no invisible window is left behind.
     DWORD WINAPI UnhideWorker(LPVOID)
     {
-        DWORD interval = 300;
-
         for (;;)
         {
-            Sleep(interval);
+            Sleep(300);
 
-            const DWORD now = GetTickCount();
             const bool alive = PolicyAlive();
 
-            std::vector<std::pair<HWND, DWORD>> snapshot;
+            std::vector<HWND> snapshot;
             EnterCriticalSection(&g_trackLock);
             snapshot = g_tracked;
             LeaveCriticalSection(&g_trackLock);
-
-            // Poll fast only while there is something to protect.
-            interval = snapshot.empty() ? 300 : 30;
 
             std::vector<HWND> reveal;
             std::vector<HWND> drop;
 
             // Query window state outside the lock: these are user32 calls and the hook
             // callbacks contend on the same section.
-            for (const auto& [hWnd, until] : snapshot)
+            for (const HWND hWnd : snapshot)
             {
                 if (!IsWindow(hWnd))
                 {
@@ -367,27 +370,25 @@ namespace
                 if (IsCondemned(hWnd))
                 {
                     if (IsWindowVisible(hWnd))
-                    {
-                        Log("WORKER hwnd=%p condemned=1 visible=1 hide=1", hWnd);
                         g_showWindow(hWnd, SW_HIDE);
-                    }
                     drop.push_back(hWnd);
                     continue;
                 }
 
-                if (!alive || static_cast<int>(now - until) >= 0)
+                if (!alive)
                 {
                     reveal.push_back(hWnd);
                     drop.push_back(hWnd);
                     continue;
                 }
 
-                if (IsWindowVisible(hWnd))
-                {
-                    // Shown through a path we did not intercept. Put the transparency back.
-                    Log("WORKER hwnd=%p visible=1 rehide=1", hWnd);
+                // Explorer can strip WS_EX_LAYERED while initializing. Put it back before the
+                // window gets a chance to paint opaque. A successful read with alpha 0 needs
+                // nothing: the window is already invisible.
+                BYTE alpha = 0;
+                DWORD flags = 0;
+                if (GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) == FALSE)
                     MakeTransparent(hWnd);
-                }
             }
 
             if (!drop.empty())
@@ -397,7 +398,7 @@ namespace
                 {
                     bool remove = false;
                     for (const HWND hWnd : drop)
-                        if (it->first == hWnd) { remove = true; break; }
+                        if (*it == hWnd) { remove = true; break; }
 
                     if (remove) it = g_tracked.erase(it);
                     else ++it;
@@ -407,8 +408,11 @@ namespace
 
             for (const HWND hWnd : reveal)
             {
-                if (IsWindow(hWnd))
-                    SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
+                if (!IsWindow(hWnd)) continue;
+                SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
+                const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
+                if ((exStyle & WS_EX_NOACTIVATE) != 0)
+                    SetWindowLongW(hWnd, GWL_EXSTYLE, exStyle & ~WS_EX_NOACTIVATE);
             }
 
             // DestroyWindow clears condemned slots precisely; this only catches windows that
