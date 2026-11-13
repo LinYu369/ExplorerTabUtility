@@ -331,7 +331,11 @@ public class ExplorerWatcher : IHook
         
         if (!WinApi.IsWindowHasClassName(hWnd, "CabinetWClass")) return;
 
-        if (_windowEntryDict.Count < 2 || Helper.IsCtrlShiftDown()) return;
+        // Hide the new window as soon as it is shown, instead of waiting for the slower
+        // ShellWindows registration/COM path. Only do this when another Explorer window exists to merge it into.
+        if (Helper.IsCtrlShiftDown() || hWnd == _mainWindowHandle) return;
+        if (WinApi.FindAllWindowsEx("CabinetWClass").All(h => h == hWnd)) return;
+
         Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
     }
     private InternetExplorer? GetRecentlyCreatedWindow(out WindowInfo? windowInfo)
