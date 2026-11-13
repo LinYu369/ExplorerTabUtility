@@ -61,6 +61,8 @@ public class ExplorerWatcher : IHook
 
         _processWatcher = new ProcessWatcher("explorer");
         _processWatcher.ProcessTerminated += OnExplorerProcessTerminated;
+        // Event driven injection: no periodic scanning in the injector itself.
+        _processWatcher.ProcessCreated += (_, e) => HookInjector.EnsureInjected(e.ProcessId);
         StartExplorerProcessCheck();
     }
 
@@ -361,6 +363,10 @@ public class ExplorerWatcher : IHook
         if (!_isForcingTabs || idObject != 0 || idChild != 0) return;
         if (!WinApi.IsWindowHasClassName(hWnd, "CabinetWClass")) return;
 
+        // Make sure the process that owns this window is injected, so its future windows are
+        // hidden from creation as well.
+        ThreadPool.QueueUserWorkItem(_ => HookInjector.EnsureInjectedForWindow(hWnd));
+
         // Check if the hWnd was processed by OnShellWindowRegistered
         if (_processedHWnds.TryRemove(hWnd, out _)) return;
 
@@ -421,6 +427,7 @@ public class ExplorerWatcher : IHook
             _ = GetTabHandle(window);
 
             hWnd = new IntPtr(window.HWND);
+            ThreadPool.QueueUserWorkItem(_ => HookInjector.EnsureInjectedForWindow(hWnd));
             DiagLog.Write($"REG found hwnd=0x{hWnd:X} dict={_windowEntryDict.Count} main=0x{_mainWindowHandle:X} ctrlShift={shouldOpenAsWindow}");
 
             if (shouldOpenAsWindow)
