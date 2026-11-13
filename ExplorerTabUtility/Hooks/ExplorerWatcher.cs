@@ -4,6 +4,7 @@ using System;
 using System.Linq;
 using System.Windows;
 using System.Threading;
+using System.Windows.Threading;
 using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Collections.Generic;
@@ -44,7 +45,10 @@ public class ExplorerWatcher : IHook
 
     private string _defaultLocation = null!;
     private bool _reuseTabs = true;
-    private bool _isForcingTabs;
+    private volatile bool _isForcingTabs;
+    private Thread? _windowShowHookThread;
+    private Dispatcher? _windowShowHookDispatcher;
+    private readonly ManualResetEventSlim _windowShowHookReady = new(false);
     public bool IsHookActive => _isForcingTabs;
     public event Action? OnShellInitialized;
 
@@ -935,9 +939,10 @@ public class ExplorerWatcher : IHook
         _windowRegisteredHandler = OnShellWindowRegistered;
         _shellWindows.WindowRegistered += _windowRegisteredHandler;
 
-        // Hook the global "OBJECT_SHOW" event
-        _eventObjectShowHookCallback = OnWindowShown;
-        _eventObjectShowHookId = WinApi.SetWinEventHook(WinApi.EVENT_OBJECT_SHOW, WinApi.EVENT_OBJECT_SHOW, 0, _eventObjectShowHookCallback, 0, 0, 0);
+        // Hook the global "OBJECT_SHOW" event on its own thread with a message loop.
+        // Out-of-context WinEvent callbacks are only delivered on the installing thread's message queue,
+        // and this method runs on a ThreadPool timer thread that never pumps messages.
+        StartWindowShowHook();
 
         // Hook the event handlers for already-open windows
         var hasOpen = false;
@@ -970,11 +975,7 @@ public class ExplorerWatcher : IHook
             _shellWindows.WindowRegistered -= _windowRegisteredHandler;
             _windowRegisteredHandler = null;
         }
-        if (_eventObjectShowHookCallback != null)
-        {
-            WinApi.UnhookWinEvent(_eventObjectShowHookId);
-            _eventObjectShowHookCallback = null;
-        }
+        StopWindowShowHook();
 
         // Unsubscribe from each InternetExplorer instance's events
         foreach (var (window, windowInfo) in _windowEntryDict)
@@ -993,6 +994,67 @@ public class ExplorerWatcher : IHook
 
         _shellPathComparer.Dispose();
         _staTaskScheduler.Dispose();
+    }
+
+    private void StartWindowShowHook()
+    {
+        if (_windowShowHookThread != null) return;
+
+        _windowShowHookReady.Reset();
+
+        var thread = new Thread(() =>
+        {
+            _windowShowHookDispatcher = Dispatcher.CurrentDispatcher;
+            _eventObjectShowHookCallback = OnWindowShown;
+            _eventObjectShowHookId = WinApi.SetWinEventHook(
+                WinApi.EVENT_OBJECT_SHOW, WinApi.EVENT_OBJECT_SHOW, 0, _eventObjectShowHookCallback, 0, 0, 0);
+
+            DiagLog.Write($"HOOK install id=0x{_eventObjectShowHookId:X} tid={Thread.CurrentThread.ManagedThreadId}");
+            _windowShowHookReady.Set();
+
+            Dispatcher.Run();
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerTabUtility.WindowShowHook"
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+
+        _windowShowHookThread = thread;
+        thread.Start();
+
+        // Wait until the hook is installed so no window is missed right after startup.
+        _windowShowHookReady.Wait(2_000);
+    }
+
+    private void StopWindowShowHook()
+    {
+        var dispatcher = _windowShowHookDispatcher;
+        if (dispatcher != null)
+        {
+            try
+            {
+                dispatcher.Invoke(() =>
+                {
+                    if (_eventObjectShowHookId == 0) return;
+
+                    WinApi.UnhookWinEvent(_eventObjectShowHookId);
+                    DiagLog.Write($"HOOK unhook id=0x{_eventObjectShowHookId:X}");
+                    _eventObjectShowHookId = 0;
+                    _eventObjectShowHookCallback = null;
+                });
+            }
+            catch
+            {
+                // The hook thread may already be gone.
+            }
+
+            dispatcher.InvokeShutdown();
+        }
+
+        _windowShowHookThread?.Join(1_000);
+        _windowShowHookThread = null;
+        _windowShowHookDispatcher = null;
     }
 
     private void PersistWindows()
