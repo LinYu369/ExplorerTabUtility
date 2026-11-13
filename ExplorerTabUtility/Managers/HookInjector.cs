@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Threading;
+using ExplorerTabUtility.Helpers;
 using ExplorerTabUtility.WinAPI;
 
 namespace ExplorerTabUtility.Managers;
@@ -49,6 +50,7 @@ internal static class HookInjector
         try
         {
             _policy?.AllowNextWindow(milliseconds);
+            DiagLog.Write($"ALLOW {milliseconds}ms");
         }
         catch
         {

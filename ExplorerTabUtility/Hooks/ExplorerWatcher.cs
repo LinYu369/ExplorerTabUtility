@@ -292,6 +292,7 @@ public class ExplorerWatcher : IHook
         var windowRecord = new WindowRecord(location, windowHandle, selectedItems);
 
         var currentWindows = WinApi.FindAllWindowsEx("CabinetWClass").ToArray();
+        DiagLog.Write($"DETACH start window=0x{windowHandle:X} tab=0x{activeTabHandle:X} location={location} windows={currentWindows.Length}");
 
         // Record the location before detaching: the command may move the tab into a new window by
         // itself, and that window registers before any later bookkeeping could run.
@@ -301,16 +302,20 @@ public class ExplorerWatcher : IHook
         // Detaching may create a window as a side effect of the close command, so allow visible
         // windows before sending it (the command itself can also open one).
         HookInjector.AllowNextWindow(2_000);
+        DiagLog.Write("DETACH allow set, sending 0xA021");
 
         // Send 0xA021 magic command (CTRL + W)
         WinApi.SendMessage(activeTabHandle, WinApi.WM_COMMAND, 0xA021, 1);
+        DiagLog.Write("DETACH sent");
 
         // If Windows already turned the tab into a window, don't create a second one.
         var detachedWindow = await Helper.DoUntilNotDefaultAsync(
             () => WinApi.FindAllWindowsEx("CabinetWClass").FirstOrDefault(h => !currentWindows.Contains(h)),
             600, 20);
+        DiagLog.Write($"DETACH nativeWindow=0x{detachedWindow:X}");
         if (detachedWindow != 0) return;
 
+        DiagLog.Write("DETACH fallback openNewWindow");
         await OpenNewWindowWithSelection(windowRecord, recordClosedWindow: false);
     }
     public void SetTargetWindow(nint windowHandle)
@@ -405,7 +410,8 @@ public class ExplorerWatcher : IHook
             _ = GetTabHandle(window);
 
             hWnd = new IntPtr(window.HWND);
-            
+            DiagLog.Write($"REG found hwnd=0x{hWnd:X} dict={_windowEntryDict.Count} main=0x{_mainWindowHandle:X} ctrlShift={shouldOpenAsWindow}");
+
             if (shouldOpenAsWindow)
             {
                 PreventWindowHiding(hWnd);
@@ -414,6 +420,7 @@ public class ExplorerWatcher : IHook
             }
             
             var location = GetLocation(window);
+            DiagLog.Write($"REG location={location}");
 
             //Control Panel
             if (location.StartsWith("shell:::{26EE0668-A00A-44D7-9371-BEB064C98683}"))
@@ -436,6 +443,7 @@ public class ExplorerWatcher : IHook
 
             // Check if it is a detached tab
             var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow);
+            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed}");
             if (isRecentlyClosed)
                 SelectItems(window, closedWindow!.SelectedItems);
 
@@ -446,6 +454,7 @@ public class ExplorerWatcher : IHook
                 showAgain = false;
 
                 var windowRecord = new WindowRecord(location, hWnd, GetSelectedItems(window));
+                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} location={location}");
 
                 // Quit the temporary window before opening the tab. While it stays alive, Explorer may
                 // re-show it during initialization, which is what makes it flash on screen.
@@ -475,6 +484,7 @@ public class ExplorerWatcher : IHook
         {
             if (showAgain)
             {
+                DiagLog.Write($"REG showAgain hwnd=0x{hWnd:X} cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
                 await Helper.DoUntilNotDefaultAsync(() => Helper.ShowWindow(hWnd, removeCache: false), 1_500, 200);
 
                 if (!SettingsManager.HaveThemeIssue)
@@ -595,6 +605,7 @@ public class ExplorerWatcher : IHook
             HookInjector.AllowNextWindow();
 
             var location = string.IsNullOrWhiteSpace(windowToOpen.Location) ? _defaultLocation : windowToOpen.Location;
+            DiagLog.Write($"OPENNEW shell location={location}");
             await RunInStaThread(() =>
             {
                 Shell? shell = null;
