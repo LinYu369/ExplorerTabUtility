@@ -291,6 +291,10 @@ public class ExplorerWatcher : IHook
         var selectedItems = GetSelectedItems(window);
         var windowRecord = new WindowRecord(location, windowHandle, selectedItems);
 
+        // Detaching may create a window as a side effect of the close command, so allow visible
+        // windows before sending it (the command itself can also open one).
+        HookInjector.AllowNextWindow(2_000);
+
         // Send 0xA021 magic command (CTRL + W)
         WinApi.SendMessage(activeTabHandle, WinApi.WM_COMMAND, 0xA021, 1);
 

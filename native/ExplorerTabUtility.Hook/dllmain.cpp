@@ -70,20 +70,16 @@ namespace
         return g_policy->enabled != 0;
     }
 
-    bool ConsumeAllowNext()
+    bool AllowWindowActive()
     {
         if (g_policy == nullptr) return false;
 
         const LONG until = g_policy->allowNextTick;
         if (until == 0) return false;
 
-        if (static_cast<int>(GetTickCount() - static_cast<DWORD>(until)) < 0)
-        {
-            InterlockedExchange(&g_policy->allowNextTick, 0);
-            return true;
-        }
-
-        return false;
+        // A time window, not a one-shot flag: a single user action (e.g. detaching a tab) can
+        // produce more than one window, and all of them must stay visible.
+        return static_cast<int>(GetTickCount() - static_cast<DWORD>(until)) < 0;
     }
 
     BOOL CALLBACK CountCabinetProc(HWND hWnd, LPARAM lParam)
@@ -113,7 +109,7 @@ namespace
         if (parent == nullptr && className != nullptr &&
             _wcsicmp(className, L"CabinetWClass") == 0)
         {
-            hide = PolicyEnabled() && !CtrlShiftDown() && !ConsumeAllowNext() &&
+            hide = PolicyEnabled() && !CtrlShiftDown() && !AllowWindowActive() &&
                 AnotherExplorerWindowExists();
 
             if (hide)
@@ -141,7 +137,17 @@ namespace
         // Explorer may reset window styles while initializing. Re-apply transparency at the
         // last moment before the window is actually shown.
         if (hWnd != nullptr && IsTracked(hWnd))
-            MakeTransparent(hWnd);
+        {
+            // Only re-hide while the window is still fully transparent. The app restores the
+            // opacity (alpha 255) when it wants to keep a window; don't undo that.
+            BYTE alpha = 0;
+            DWORD flags = 0;
+            if (!GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) ||
+                (flags & LWA_ALPHA) == 0 || alpha == 0)
+            {
+                MakeTransparent(hWnd);
+            }
+        }
 
         return g_showWindow(hWnd, nCmdShow);
     }
