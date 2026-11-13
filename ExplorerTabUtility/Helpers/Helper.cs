@@ -384,6 +384,8 @@ public static class Helper
     }
     public static void HideWindow(nint hWnd, bool keepTheme = false)
     {
+        DiagLog.Write($"HIDE hwnd=0x{hWnd:X} cached={HiddenWindows.ContainsKey(hWnd)} keepTheme={keepTheme} visible={WinApi.IsWindowVisible(hWnd)}");
+
         HiddenWindows.GetOrAdd(hWnd, static (hWnd, keepTheme) =>
         {
             if (keepTheme)
@@ -402,9 +404,13 @@ public static class Helper
             WinApi.SetLayeredWindowAttributes(hWnd, 0, 0, WinApi.LWA_ALPHA);
             return null;
         }, keepTheme);
+
+        DiagLog.Write($"HIDE done hwnd=0x{hWnd:X} visible={WinApi.IsWindowVisible(hWnd)}");
     }
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
+        DiagLog.Write($"SHOWWIN hwnd=0x{hWnd:X} removeCache={removeCache} cached={HiddenWindows.ContainsKey(hWnd)}");
+
         if (!HiddenWindows.TryGetValue(hWnd, out var originalPos))
             return false;
 

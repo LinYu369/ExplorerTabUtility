@@ -325,18 +325,29 @@ public class ExplorerWatcher : IHook
     private void OnWindowShown(nint hWinEventHook, uint eventType, nint hWnd, int idObject, int idChild, uint dwEventThread, uint dWmsEventTime)
     {
         if (!_isForcingTabs || idObject != 0 || idChild != 0) return;
-        
-        // Check if the hWnd was processed by OnShellWindowRegistered
-        if (_processedHWnds.TryRemove(hWnd, out _)) return;
-        
         if (!WinApi.IsWindowHasClassName(hWnd, "CabinetWClass")) return;
+
+        DiagLog.Write($"SHOW hwnd=0x{hWnd:X}");
+
+        // Check if the hWnd was processed by OnShellWindowRegistered
+        if (_processedHWnds.TryRemove(hWnd, out _))
+        {
+            DiagLog.Write($"SHOW skip=processed hwnd=0x{hWnd:X}");
+            return;
+        }
 
         // Hide the new window as soon as it is shown, instead of waiting for the slower
         // ShellWindows registration/COM path. Only do this when another Explorer window exists to merge it into.
-        if (Helper.IsCtrlShiftDown() || hWnd == _mainWindowHandle) return;
-        if (WinApi.FindAllWindowsEx("CabinetWClass").All(h => h == hWnd)) return;
+        var ctrlShift = Helper.IsCtrlShiftDown();
+        var isMainWindow = hWnd == _mainWindowHandle;
+        var otherWindowCount = WinApi.FindAllWindowsEx("CabinetWClass").Count(h => h != hWnd);
+        DiagLog.Write($"SHOW eval hwnd=0x{hWnd:X} ctrlShift={ctrlShift} isMain={isMainWindow} others={otherWindowCount} main=0x{_mainWindowHandle:X}");
+
+        if (ctrlShift || isMainWindow) return;
+        if (otherWindowCount == 0) return;
 
         Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
+        DiagLog.Write($"SHOW hidden hwnd=0x{hWnd:X} visible={WinApi.IsWindowVisible(hWnd)}");
     }
     private InternetExplorer? GetRecentlyCreatedWindow(out WindowInfo? windowInfo)
     {
@@ -374,17 +385,24 @@ public class ExplorerWatcher : IHook
     {
         var showAgain = true;
         nint hWnd = 0;
+        var startedAt = Environment.TickCount64;
         try
         {
             var shouldOpenAsWindow = Helper.IsCtrlShiftDown();
+            DiagLog.Write($"REG start ctrlShift={shouldOpenAsWindow}");
 
             WindowInfo windowInfo = null!;
             var window = await Helper.DoUntilNotDefaultAsync(() => GetRecentlyCreatedWindow(out windowInfo!), 2_500, 70);
-            if (window == null) return;
+            if (window == null)
+            {
+                DiagLog.Write($"REG no-window after={Environment.TickCount64 - startedAt}ms");
+                return;
+            }
 
             _ = GetTabHandle(window);
 
             hWnd = new IntPtr(window.HWND);
+            DiagLog.Write($"REG found hwnd=0x{hWnd:X} after={Environment.TickCount64 - startedAt}ms dict={_windowEntryDict.Count} main=0x{_mainWindowHandle:X} cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
             
             if (shouldOpenAsWindow)
             {
@@ -409,6 +427,8 @@ public class ExplorerWatcher : IHook
                                     hWnd != _mainWindowHandle &&
                                     Helper.GetAllExplorerTabs(hWnd).Take(2).Count() == 1;
 
+            DiagLog.Write($"REG branch hwnd=0x{hWnd:X} reopen={shouldReopenAsTab} location={location}");
+
             if (shouldReopenAsTab)
                 Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
             else
@@ -426,6 +446,8 @@ public class ExplorerWatcher : IHook
                 showAgain = false;
 
                 _ = OpenTabNavigateWithSelection(new WindowRecord(location, hWnd, GetSelectedItems(window)), _mainWindowHandle);
+
+                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} target=0x{_mainWindowHandle:X} elapsed={Environment.TickCount64 - startedAt}ms");
 
                 window.Quit();
                 RemoveWindowAndUnhookEvents(window, windowInfo);
@@ -451,6 +473,7 @@ public class ExplorerWatcher : IHook
         {
             if (showAgain)
             {
+                DiagLog.Write($"REG show-again hwnd=0x{hWnd:X} elapsed={Environment.TickCount64 - startedAt}ms cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
                 await Helper.DoUntilNotDefaultAsync(() => Helper.ShowWindow(hWnd, removeCache: false), 1_500, 200);
 
                 if (!SettingsManager.HaveThemeIssue)
