@@ -449,16 +449,20 @@ public class ExplorerWatcher : IHook
             {
                 showAgain = false;
 
-                _ = OpenTabNavigateWithSelection(new WindowRecord(location, hWnd, GetSelectedItems(window)), _mainWindowHandle);
+                var windowRecord = new WindowRecord(location, hWnd, GetSelectedItems(window));
+                WinApi.GetLayeredWindowAttributes(hWnd, out _, out var preQuitAlpha, out _);
+                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} target=0x{_mainWindowHandle:X} elapsed={unchecked(Environment.TickCount - startedAt)}ms alphaBeforeQuit={preQuitAlpha}");
 
-                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} target=0x{_mainWindowHandle:X} elapsed={unchecked(Environment.TickCount - startedAt)}ms");
-
+                // Quit the temporary window before opening the tab. While it stays alive, Explorer may
+                // re-show it during initialization, which is what makes it flash on screen.
                 window.Quit();
                 RemoveWindowAndUnhookEvents(window, windowInfo);
 
                 // Don't keep the handle in the hidden-window cache: Windows may reuse this HWND for a
                 // future Explorer window, and a stale entry would make HideWindow skip hiding it.
                 Helper.HiddenWindows.TryRemove(hWnd, out _);
+
+                _ = OpenTabNavigateWithSelection(windowRecord, _mainWindowHandle);
                 return;
             }
 
