@@ -442,7 +442,8 @@ public class ExplorerWatcher : IHook
             }
 
             // Check if it is a detached/reattached tab before deciding to hide or merge it.
-            var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow);
+            // A little extra margin: the fallback window can take a while to register on a busy system.
+            var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow, 3_000);
 
             // Check if this is a single tab window and there are other windows
             var shouldReopenAsTab = (_isForcingTabs || _reuseTabs) &&
@@ -601,6 +602,10 @@ public class ExplorerWatcher : IHook
         {
             if (recordClosedWindow)
             {
+                // Restart the "recently closed" validity window: this record may have been created
+                // earlier (e.g. before a detach wait), and the window we are about to open must be
+                // recognized regardless of how long that took.
+                windowToOpen.CreatedAt = Environment.TickCount;
                 lock (_closedWindowsLock)
                     _closedWindows.Add(windowToOpen);
             }
