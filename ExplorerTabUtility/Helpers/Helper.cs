@@ -386,26 +386,35 @@ public static class Helper
     {
         DiagLog.Write($"HIDE hwnd=0x{hWnd:X} cached={HiddenWindows.ContainsKey(hWnd)} keepTheme={keepTheme} visible={WinApi.IsWindowVisible(hWnd)}");
 
-        HiddenWindows.GetOrAdd(hWnd, static (hWnd, keepTheme) =>
+        if (!HiddenWindows.ContainsKey(hWnd))
         {
+            RECT? originalPos = null;
             if (keepTheme)
             {
-                WinApi.GetWindowRect(hWnd, out var originalPos);
-                HiddenWindows[hWnd] = originalPos;
-
-                // Move it off-screen
-                const uint flags = WinApi.SWP_HIDEWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE | WinApi.SWP_FRAMECHANGED;
-                WinApi.SetWindowPos(hWnd, 0, -32_000, -32_000, 0, 0, flags);
-                return originalPos;
+                WinApi.GetWindowRect(hWnd, out var rect);
+                originalPos = rect;
             }
+            HiddenWindows[hWnd] = originalPos;
+        }
 
-            // Set the transparency (alpha value) of the window (0 = transparent, 255 = opaque)
-            UpdateWindowLayered(hWnd, remove: false);
-            WinApi.SetLayeredWindowAttributes(hWnd, 0, 0, WinApi.LWA_ALPHA);
-            return null;
-        }, keepTheme);
+        // DWM cloak hides the window at the compositor level, independent of window styles.
+        // Re-apply on every call: Explorer may reset styles while initializing a new window.
+        var cloak = 1;
+        var hr = WinApi.DwmSetWindowAttribute(hWnd, WinApi.DWMWA_CLOAK, ref cloak, sizeof(int));
+        WinApi.DwmGetWindowAttribute(hWnd, WinApi.DWMWA_CLOAKED, out var isCloaked, sizeof(int));
 
-        DiagLog.Write($"HIDE done hwnd=0x{hWnd:X} visible={WinApi.IsWindowVisible(hWnd)}");
+        if (HiddenWindows.TryGetValue(hWnd, out var pos) && pos.HasValue)
+        {
+            // Move it off-screen as well, so it also disappears on systems without DWM cloaking.
+            const uint flags = WinApi.SWP_HIDEWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE | WinApi.SWP_FRAMECHANGED;
+            WinApi.SetWindowPos(hWnd, 0, -32_000, -32_000, 0, 0, flags);
+        }
+
+        // Set the transparency (alpha value) of the window (0 = transparent, 255 = opaque)
+        UpdateWindowLayered(hWnd, remove: false);
+        WinApi.SetLayeredWindowAttributes(hWnd, 0, 0, WinApi.LWA_ALPHA);
+
+        DiagLog.Write($"HIDE done hwnd=0x{hWnd:X} hr=0x{hr:X} cloaked={isCloaked} visible={WinApi.IsWindowVisible(hWnd)}");
     }
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
@@ -416,6 +425,9 @@ public static class Helper
 
         if (removeCache)
             HiddenWindows.TryRemove(hWnd, out _);
+
+        var cloak = 0;
+        WinApi.DwmSetWindowAttribute(hWnd, WinApi.DWMWA_CLOAK, ref cloak, sizeof(int));
 
         if (originalPos != null) // keep theme
         {

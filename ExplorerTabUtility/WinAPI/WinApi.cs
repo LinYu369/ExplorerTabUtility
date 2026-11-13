@@ -68,6 +68,15 @@ public static class WinApi
     [DllImport("user32.dll")]
     public static extern bool IsWindowVisible(nint handle);
 
+    public const int DWMWA_CLOAK = 13;
+    public const int DWMWA_CLOAKED = 14;
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmSetWindowAttribute(nint hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    [DllImport("dwmapi.dll")]
+    public static extern int DwmGetWindowAttribute(nint hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
+
     [DllImport("user32.dll")]
     public static extern nint GetForegroundWindow();
 
