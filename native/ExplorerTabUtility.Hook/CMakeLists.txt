@@ -13,6 +13,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(minhook)
 
 add_library(ExplorerTabUtility.Hook SHARED dllmain.cpp)
+target_include_directories(ExplorerTabUtility.Hook PRIVATE "${minhook_SOURCE_DIR}/include")
 target_link_libraries(ExplorerTabUtility.Hook PRIVATE minhook user32)
 
 set_target_properties(ExplorerTabUtility.Hook PROPERTIES
