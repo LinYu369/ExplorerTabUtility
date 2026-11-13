@@ -1,4 +1,6 @@
 #include <windows.h>
+#include <cstdio>
+#include <cstdarg>
 #include <vector>
 #include <utility>
 #include <cwchar>
@@ -25,8 +27,59 @@ namespace
         HWND, HMENU, HINSTANCE, LPVOID);
     CreateWindowExW_t g_createWindowExW = nullptr;
 
+    using ShowWindow_t = BOOL(WINAPI*)(HWND, int);
+    ShowWindow_t g_showWindow = nullptr;
+
     CRITICAL_SECTION g_trackLock;
     std::vector<std::pair<HWND, DWORD>> g_tracked; // window, tick when it should be unhidden again
+
+    void Log(const char* format, ...)
+    {
+        char path[MAX_PATH];
+        if (GetTempPathA(MAX_PATH, path) == 0) return;
+        strcat_s(path, "ExplorerTabUtility-hook.log");
+
+        FILE* file = nullptr;
+        if (fopen_s(&file, path, "a") != 0 || file == nullptr) return;
+
+        SYSTEMTIME time;
+        GetLocalTime(&time);
+        std::fprintf(file, "%02d:%02d:%02d.%03d ", time.wHour, time.wMinute, time.wSecond,
+            time.wMilliseconds);
+
+        va_list args;
+        va_start(args, format);
+        std::vfprintf(file, format, args);
+        va_end(args);
+
+        std::fprintf(file, "\n");
+        std::fclose(file);
+    }
+
+    bool IsTracked(HWND hWnd)
+    {
+        bool found = false;
+        EnterCriticalSection(&g_trackLock);
+        for (const auto& [tracked, until] : g_tracked)
+        {
+            if (tracked == hWnd)
+            {
+                found = true;
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_trackLock);
+        return found;
+    }
+
+    void MakeTransparent(HWND hWnd)
+    {
+        const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
+        if ((exStyle & WS_EX_LAYERED) == 0)
+            SetWindowLongW(hWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+
+        SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
+    }
 
     bool CtrlShiftDown()
     {
@@ -83,12 +136,19 @@ namespace
         bool hide = false;
 
         if (parent == nullptr && className != nullptr &&
-            _wcsicmp(className, L"CabinetWClass") == 0 &&
-            PolicyEnabled() && !CtrlShiftDown() && !ConsumeAllowNext() &&
-            AnotherExplorerWindowExists())
+            _wcsicmp(className, L"CabinetWClass") == 0)
         {
-            exStyle |= WS_EX_LAYERED;
-            hide = true;
+            const bool enabled = PolicyEnabled();
+            const bool ctrlShift = CtrlShiftDown();
+            const bool allowNext = ConsumeAllowNext();
+            const bool otherWindow = AnotherExplorerWindowExists();
+
+            hide = enabled && !ctrlShift && !allowNext && otherWindow;
+            Log("CREATE enabled=%d ctrlShift=%d allowNext=%d otherWindow=%d hide=%d",
+                enabled, ctrlShift, allowNext, otherWindow, hide);
+
+            if (hide)
+                exStyle |= WS_EX_LAYERED;
         }
 
         const HWND hWnd = g_createWindowExW(exStyle, className, windowName, style, x, y, width,
@@ -97,7 +157,7 @@ namespace
         if (hide && hWnd != nullptr)
         {
             // Make it transparent immediately, still before the window is first shown.
-            SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
+            MakeTransparent(hWnd);
 
             EnterCriticalSection(&g_trackLock);
             g_tracked.emplace_back(hWnd, GetTickCount() + 4'000);
@@ -105,6 +165,19 @@ namespace
         }
 
         return hWnd;
+    }
+
+    BOOL WINAPI HookShowWindow(HWND hWnd, int nCmdShow)
+    {
+        // Explorer may reset window styles while initializing. Re-apply transparency at the
+        // last moment before the window is actually shown.
+        if (hWnd != nullptr && IsTracked(hWnd))
+        {
+            MakeTransparent(hWnd);
+            Log("SHOWWINDOW hwnd=%p cmd=%d", hWnd, nCmdShow);
+        }
+
+        return g_showWindow(hWnd, nCmdShow);
     }
 
     // Safety net: if the app dies between window creation and merging, don't leave an invisible
@@ -152,16 +225,29 @@ namespace
         }
 
         // If the app never created the mapping, stay completely passive.
-        if (g_policy == nullptr) return 0;
+        if (g_policy == nullptr)
+        {
+            Log("INIT no policy mapping, passive");
+            return 0;
+        }
 
         InitializeCriticalSection(&g_trackLock);
 
-        if (MH_Initialize() != MH_OK) return 0;
+        if (MH_Initialize() != MH_OK)
+        {
+            Log("INIT MH_Initialize failed");
+            return 0;
+        }
 
-        const MH_STATUS status = MH_CreateHookApi(L"user32.dll", "CreateWindowExW",
+        const MH_STATUS createStatus = MH_CreateHookApi(L"user32.dll", "CreateWindowExW",
             reinterpret_cast<LPVOID>(&HookCreateWindowExW),
             reinterpret_cast<LPVOID*>(&g_createWindowExW));
-        if (status != MH_OK) return 0;
+        const MH_STATUS showStatus = MH_CreateHookApi(L"user32.dll", "ShowWindow",
+            reinterpret_cast<LPVOID>(&HookShowWindow),
+            reinterpret_cast<LPVOID*>(&g_showWindow));
+
+        Log("INIT createHook=%d showHook=%d", createStatus, showStatus);
+        if (createStatus != MH_OK || showStatus != MH_OK) return 0;
 
         MH_EnableHook(MH_ALL_HOOKS);
         CreateThread(nullptr, 0, UnhideWorker, nullptr, 0, nullptr);
