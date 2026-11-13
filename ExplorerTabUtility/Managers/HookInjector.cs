@@ -117,6 +117,18 @@ internal static class HookInjector
         }
     }
 
+    public static void ReleaseWindow(nint hWnd)
+    {
+        try
+        {
+            _policy?.ReleaseWindow(hWnd);
+        }
+        catch
+        {
+            // Never break window restoring because of the hook.
+        }
+    }
+
     public static void EnsureInjectedForWindow(nint hWnd)
     {
         if (_policy == null || hWnd == 0) return;

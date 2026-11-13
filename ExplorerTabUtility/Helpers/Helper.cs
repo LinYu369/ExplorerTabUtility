@@ -448,6 +448,10 @@ public static class Helper
         if (removeCache)
             HiddenWindows.TryRemove(hWnd, out _);
 
+        // Stop the injected hook from managing this window before touching its visibility,
+        // otherwise it treats the restore below as another show it has to undo.
+        HookInjector.ReleaseWindow(hWnd);
+
         TaskbarHelper.AddTab(hWnd);
 
         if (wasHidden && originalPos != null) // keep theme
