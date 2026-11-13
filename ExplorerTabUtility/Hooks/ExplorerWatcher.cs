@@ -45,6 +45,7 @@ public class ExplorerWatcher : IHook
 
     private string _defaultLocation = null!;
     private bool _reuseTabs = true;
+    private int _allowVisibleUntil;
     private volatile bool _isForcingTabs;
     private Thread? _windowShowHookThread;
     private Dispatcher? _windowShowHookDispatcher;
@@ -301,6 +302,7 @@ public class ExplorerWatcher : IHook
 
         // Detaching may create a window as a side effect of the close command, so allow visible
         // windows before sending it (the command itself can also open one).
+        _allowVisibleUntil = unchecked(Environment.TickCount + 3_000);
         HookInjector.AllowNextWindow(2_000);
         DiagLog.Write("DETACH allow set, sending 0xA021");
 
@@ -315,8 +317,14 @@ public class ExplorerWatcher : IHook
         DiagLog.Write($"DETACH nativeWindow=0x{detachedWindow:X}");
         if (detachedWindow != 0) return;
 
+        // No native detach window: drop the early record so OpenNewWindow can add a fresh one.
+        // Otherwise the 2 second "recently closed" window has already partly elapsed by the time
+        // the fallback window registers, and it would be merged back into a tab.
+        lock (_closedWindowsLock)
+            _closedWindows.Remove(windowRecord);
+
         DiagLog.Write("DETACH fallback openNewWindow");
-        await OpenNewWindowWithSelection(windowRecord, recordClosedWindow: false);
+        await OpenNewWindowWithSelection(windowRecord);
     }
     public void SetTargetWindow(nint windowHandle)
     {
@@ -355,6 +363,9 @@ public class ExplorerWatcher : IHook
 
         // Check if the hWnd was processed by OnShellWindowRegistered
         if (_processedHWnds.TryRemove(hWnd, out _)) return;
+
+        // Windows we opened on purpose (detach, explicit new window) must stay visible.
+        if (unchecked(Environment.TickCount - _allowVisibleUntil) < 0) return;
 
         // Hide the new window as soon as it is shown, instead of waiting for the slower
         // ShellWindows registration/COM path. Only do this when another Explorer window exists to merge it into.
@@ -430,24 +441,25 @@ public class ExplorerWatcher : IHook
                 return;
             }
 
+            // Check if it is a detached/reattached tab before deciding to hide or merge it.
+            var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow);
+
             // Check if this is a single tab window and there are other windows
             var shouldReopenAsTab = (_isForcingTabs || _reuseTabs) &&
+                                    !isRecentlyClosed &&
                                     _windowEntryDict.Count > 1 &&
                                     hWnd != _mainWindowHandle &&
                                     Helper.GetAllExplorerTabs(hWnd).Take(2).Count() == 1;
+
+            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed}");
 
             if (shouldReopenAsTab)
                 Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
             else
                 PreventWindowHiding(hWnd);
 
-            // Check if it is a detached tab
-            var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow);
-            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed}");
             if (isRecentlyClosed)
                 SelectItems(window, closedWindow!.SelectedItems);
-
-            shouldReopenAsTab = shouldReopenAsTab && !isRecentlyClosed;
 
             if (shouldReopenAsTab)
             {
@@ -603,6 +615,8 @@ public class ExplorerWatcher : IHook
 
             // This window is meant to stay visible; tell the injected hook not to hide it.
             HookInjector.AllowNextWindow();
+
+            _allowVisibleUntil = unchecked(Environment.TickCount + 3_000);
 
             var location = string.IsNullOrWhiteSpace(windowToOpen.Location) ? _defaultLocation : windowToOpen.Location;
             DiagLog.Write($"OPENNEW shell location={location}");
