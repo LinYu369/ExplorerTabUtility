@@ -428,21 +428,20 @@ public static class Helper
     }
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
-        if (!HiddenWindows.TryGetValue(hWnd, out var originalPos))
-            return false;
+        var wasHidden = HiddenWindows.TryGetValue(hWnd, out var originalPos);
 
         if (removeCache)
             HiddenWindows.TryRemove(hWnd, out _);
 
         TaskbarHelper.AddTab(hWnd);
 
-        if (originalPos != null) // keep theme
+        if (wasHidden && originalPos != null) // keep theme
         {
             const uint flags = WinApi.SWP_SHOWWINDOW | WinApi.SWP_NOSIZE | WinApi.SWP_NOZORDER | WinApi.SWP_NOACTIVATE | WinApi.SWP_FRAMECHANGED;
             WinApi.SetWindowPos(hWnd, 0, originalPos.Value.Left, originalPos.Value.Top, 0, 0, flags);
-            return true;
         }
 
+        // Also restores windows that the injected hook made transparent at creation time.
         WinApi.SetLayeredWindowAttributes(hWnd, 0, 255, WinApi.LWA_ALPHA);
         return true;
     }

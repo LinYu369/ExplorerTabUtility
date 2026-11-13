@@ -55,6 +55,9 @@
 
     <ItemGroup>
         <Resource Include="Icon.ico"/>
+        <Content Include="ExplorerTabUtility.Hook.dll"
+                 Condition="Exists('ExplorerTabUtility.Hook.dll')"
+                 CopyToOutputDirectory="PreserveNewest"/>
     </ItemGroup>
 
 </Project>

@@ -20,7 +20,28 @@ env:
   VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
 
 jobs:
+  build-native:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S native/ExplorerTabUtility.Hook -B native/build -A x64
+        shell: pwsh
+
+      - name: Build native hook
+        run: cmake --build native/build --config Release
+        shell: pwsh
+
+      - name: Upload native hook
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-hook-x64
+          path: native/build/bin/ExplorerTabUtility.Hook.dll
+
   build:
+    needs: build-native
     runs-on: windows-latest
     strategy:
       matrix:
@@ -31,6 +52,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Download native hook
+        uses: actions/download-artifact@v4
+        with:
+          name: native-hook-x64
+          path: ${{ env.PROJECT_NAME }}
 
       - name: Setup MSBuild Environments
         uses: microsoft/setup-msbuild@v2

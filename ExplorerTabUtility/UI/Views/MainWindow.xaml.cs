@@ -94,6 +94,7 @@ public partial class MainWindow : Window
         if (SettingsManager.IsMouseHookActive) _hookManager.StartMouseHook();
         if (SettingsManager.IsKeyboardHookActive) _hookManager.StartKeyboardHook();
         _hookManager.SetReuseTabs(SettingsManager.ReuseTabs);
+        HookInjector.Start();
     }
 
     private void ToggleWindowVisibility()

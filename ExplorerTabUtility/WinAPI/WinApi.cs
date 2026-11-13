@@ -100,10 +100,31 @@ public static class WinApi
     public static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
     
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern nint OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+    public static extern nint OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
     
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(nint hObject);
+    public static extern bool CloseHandle(nint hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern nint VirtualAllocEx(nint hProcess, nint lpAddress, nuint dwSize, uint flAllocationType, uint flProtect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool VirtualFreeEx(nint hProcess, nint lpAddress, nuint dwSize, uint dwFreeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool WriteProcessMemory(nint hProcess, nint lpBaseAddress, byte[] lpBuffer, nuint nSize, out nuint lpNumberOfBytesWritten);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern nint CreateRemoteThread(nint hProcess, nint lpThreadAttributes, nuint dwStackSize, nint lpStartAddress, nint lpParameter, uint dwCreationFlags, out uint lpThreadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    public static extern nint GetModuleHandleW(string lpModuleName);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    public static extern nint GetProcAddress(nint hModule, string lpProcName);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern bool QueryFullProcessImageName(nint hProcess, uint dwFlags, StringBuilder lpExeName, ref int lpdwSize);

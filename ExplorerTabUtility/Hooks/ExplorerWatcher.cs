@@ -570,6 +570,9 @@ public class ExplorerWatcher : IHook
 
             Helper.BypassWinForegroundRestrictions();
 
+            // This window is meant to stay visible; tell the injected hook not to hide it.
+            HookInjector.AllowNextWindow();
+
             var location = string.IsNullOrWhiteSpace(windowToOpen.Location) ? _defaultLocation : windowToOpen.Location;
             await RunInStaThread(() =>
             {
