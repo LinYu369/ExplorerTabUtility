@@ -429,6 +429,10 @@ public class ExplorerWatcher : IHook
 
                 window.Quit();
                 RemoveWindowAndUnhookEvents(window, windowInfo);
+
+                // Don't keep the handle in the hidden-window cache: Windows may reuse this HWND for a
+                // future Explorer window, and a stale entry would make HideWindow skip hiding it.
+                Helper.HiddenWindows.TryRemove(hWnd, out _);
                 return;
             }
 
