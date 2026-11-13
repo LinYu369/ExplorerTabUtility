@@ -385,7 +385,7 @@ public class ExplorerWatcher : IHook
     {
         var showAgain = true;
         nint hWnd = 0;
-        var startedAt = Environment.TickCount64;
+        var startedAt = Environment.TickCount;
         try
         {
             var shouldOpenAsWindow = Helper.IsCtrlShiftDown();
@@ -395,14 +395,14 @@ public class ExplorerWatcher : IHook
             var window = await Helper.DoUntilNotDefaultAsync(() => GetRecentlyCreatedWindow(out windowInfo!), 2_500, 70);
             if (window == null)
             {
-                DiagLog.Write($"REG no-window after={Environment.TickCount64 - startedAt}ms");
+                DiagLog.Write($"REG no-window after={unchecked(Environment.TickCount - startedAt)}ms");
                 return;
             }
 
             _ = GetTabHandle(window);
 
             hWnd = new IntPtr(window.HWND);
-            DiagLog.Write($"REG found hwnd=0x{hWnd:X} after={Environment.TickCount64 - startedAt}ms dict={_windowEntryDict.Count} main=0x{_mainWindowHandle:X} cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
+            DiagLog.Write($"REG found hwnd=0x{hWnd:X} after={unchecked(Environment.TickCount - startedAt)}ms dict={_windowEntryDict.Count} main=0x{_mainWindowHandle:X} cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
             
             if (shouldOpenAsWindow)
             {
@@ -447,7 +447,7 @@ public class ExplorerWatcher : IHook
 
                 _ = OpenTabNavigateWithSelection(new WindowRecord(location, hWnd, GetSelectedItems(window)), _mainWindowHandle);
 
-                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} target=0x{_mainWindowHandle:X} elapsed={Environment.TickCount64 - startedAt}ms");
+                DiagLog.Write($"REG merge hwnd=0x{hWnd:X} target=0x{_mainWindowHandle:X} elapsed={unchecked(Environment.TickCount - startedAt)}ms");
 
                 window.Quit();
                 RemoveWindowAndUnhookEvents(window, windowInfo);
@@ -473,7 +473,7 @@ public class ExplorerWatcher : IHook
         {
             if (showAgain)
             {
-                DiagLog.Write($"REG show-again hwnd=0x{hWnd:X} elapsed={Environment.TickCount64 - startedAt}ms cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
+                DiagLog.Write($"REG show-again hwnd=0x{hWnd:X} elapsed={unchecked(Environment.TickCount - startedAt)}ms cached={Helper.HiddenWindows.ContainsKey(hWnd)}");
                 await Helper.DoUntilNotDefaultAsync(() => Helper.ShowWindow(hWnd, removeCache: false), 1_500, 200);
 
                 if (!SettingsManager.HaveThemeIssue)
