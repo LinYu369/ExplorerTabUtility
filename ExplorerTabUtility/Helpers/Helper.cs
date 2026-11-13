@@ -396,7 +396,7 @@ public static class Helper
     }
     public static void HideWindow(nint hWnd, bool keepTheme = false)
     {
-        DiagLog.Write($"HIDE hwnd=0x{hWnd:X} cached={HiddenWindows.ContainsKey(hWnd)}");
+        DiagLog.Write($"HIDE hwnd=0x{(long)hWnd:X} cached={HiddenWindows.ContainsKey(hWnd)}");
 
         if (!HiddenWindows.ContainsKey(hWnd))
         {
@@ -443,7 +443,7 @@ public static class Helper
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
         var wasHidden = HiddenWindows.TryGetValue(hWnd, out var originalPos);
-        DiagLog.Write($"SHOWWIN hwnd=0x{hWnd:X} cached={wasHidden}");
+        DiagLog.Write($"SHOWWIN hwnd=0x{(long)hWnd:X} cached={wasHidden}");
 
         if (removeCache)
             HiddenWindows.TryRemove(hWnd, out _);

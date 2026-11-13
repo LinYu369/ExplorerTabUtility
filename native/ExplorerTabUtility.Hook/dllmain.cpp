@@ -13,11 +13,17 @@
 
 namespace
 {
+    constexpr int CondemnedSlots = 8;
+
     struct Policy
     {
         volatile LONG enabled;        // 1 while the app wants new windows merged into tabs
         volatile LONG allowNextTick;  // When set, the next created window must stay visible
         volatile LONG heartbeat;      // Updated by the app every second
+        volatile LONG reserved;
+        // Windows the app has already merged into a tab and quit. Explorer still shows them
+        // once while tearing them down; those shows must never reach the screen.
+        volatile ULONGLONG condemned[CondemnedSlots];
     };
 
     Policy* g_policy = nullptr;
@@ -30,8 +36,11 @@ namespace
     using ShowWindow_t = BOOL(WINAPI*)(HWND, int);
     ShowWindow_t g_showWindow = nullptr;
 
+    using DestroyWindow_t = BOOL(WINAPI*)(HWND);
+    DestroyWindow_t g_destroyWindow = nullptr;
+
     CRITICAL_SECTION g_trackLock;
-    std::vector<std::pair<HWND, DWORD>> g_tracked; // window, tick when it should be unhidden again
+    std::vector<std::pair<HWND, DWORD>> g_tracked; // window, tick of the last-resort reveal
 
     void Log(const char* format, ...)
     {
@@ -72,6 +81,20 @@ namespace
         return found;
     }
 
+    void Untrack(HWND hWnd)
+    {
+        EnterCriticalSection(&g_trackLock);
+        for (auto it = g_tracked.begin(); it != g_tracked.end(); ++it)
+        {
+            if (it->first == hWnd)
+            {
+                g_tracked.erase(it);
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_trackLock);
+    }
+
     void MakeTransparent(HWND hWnd)
     {
         const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
@@ -81,18 +104,34 @@ namespace
         SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
     }
 
+    // The app releases a window by setting alpha back to 255 and then dropping WS_EX_LAYERED.
+    // Both mean "keep this one visible". A window that is already on screen without the layered
+    // style must never be re-hidden, so a failed attribute read alone is not enough to decide.
+    bool AppRestored(HWND hWnd)
+    {
+        BYTE alpha = 0;
+        DWORD flags = 0;
+        if (GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) != FALSE)
+            return (flags & LWA_ALPHA) != 0 && alpha != 0;
+
+        return IsWindowVisible(hWnd) != FALSE;
+    }
+
     bool CtrlShiftDown()
     {
         return (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 &&
             (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     }
 
-    bool PolicyEnabled()
+    bool PolicyAlive()
     {
         if (g_policy == nullptr) return false;
+        return static_cast<DWORD>(GetTickCount() - g_policy->heartbeat) <= 5'000;
+    }
 
-        if (static_cast<DWORD>(GetTickCount() - g_policy->heartbeat) > 5'000) return false;
-        return g_policy->enabled != 0;
+    bool PolicyEnabled()
+    {
+        return PolicyAlive() && g_policy->enabled != 0;
     }
 
     bool AllowWindowActive()
@@ -105,6 +144,29 @@ namespace
         // A time window, not a one-shot flag: a single user action (e.g. detaching a tab) can
         // produce more than one window, and all of them must stay visible.
         return static_cast<int>(GetTickCount() - static_cast<DWORD>(until)) < 0;
+    }
+
+    bool IsCondemned(HWND hWnd)
+    {
+        if (g_policy == nullptr || hWnd == nullptr || !PolicyAlive()) return false;
+
+        const auto value = static_cast<ULONGLONG>(reinterpret_cast<UINT_PTR>(hWnd));
+        for (int i = 0; i < CondemnedSlots; ++i)
+            if (g_policy->condemned[i] == value) return true;
+
+        return false;
+    }
+
+    void ClearCondemned(HWND hWnd)
+    {
+        if (g_policy == nullptr || hWnd == nullptr) return;
+
+        const auto value = static_cast<ULONGLONG>(reinterpret_cast<UINT_PTR>(hWnd));
+        for (int i = 0; i < CondemnedSlots; ++i)
+        {
+            if (g_policy->condemned[i] == value)
+                InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&g_policy->condemned[i]), 0);
+        }
     }
 
     BOOL CALLBACK CountCabinetProc(HWND hWnd, LPARAM lParam)
@@ -156,7 +218,7 @@ namespace
             MakeTransparent(hWnd);
 
             EnterCriticalSection(&g_trackLock);
-            g_tracked.emplace_back(hWnd, GetTickCount() + 4'000);
+            g_tracked.emplace_back(hWnd, GetTickCount() + 10'000);
             LeaveCriticalSection(&g_trackLock);
         }
 
@@ -165,23 +227,50 @@ namespace
 
     BOOL WINAPI HookShowWindow(HWND hWnd, int nCmdShow)
     {
-        // Explorer may reset window styles while initializing. Re-apply transparency at the
-        // last moment before the window is actually shown.
-        if (hWnd != nullptr && IsTracked(hWnd))
+        if (hWnd != nullptr)
         {
-            // Only re-hide while the window is still fully transparent. The app restores the
-            // opacity (alpha 255) when it wants to keep a window; don't undo that.
-            BYTE alpha = 0;
-            DWORD flags = 0;
-            const bool read = GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) != FALSE;
-            const bool rehide = !read || (flags & LWA_ALPHA) == 0 || alpha == 0;
+            // The app merged this window into a tab and quit it. Explorer still calls
+            // ShowWindow(SW_SHOWNORMAL) once during teardown, which activates the window and
+            // puts it on screen and in the taskbar. Restoring transparency alone is not enough:
+            // by then the show/activate already happened. Turn it into a hide instead, so the
+            // outcome no longer depends on which side wins the race.
+            if (nCmdShow != SW_HIDE && IsCondemned(hWnd) && !AppRestored(hWnd))
+            {
+                Log("SHOWWINDOW hwnd=%p cmd=%d condemned=1 suppressed=1", hWnd, nCmdShow);
+                return g_showWindow(hWnd, SW_HIDE);
+            }
 
-            Log("SHOWWINDOW hwnd=%p cmd=%d read=%d alpha=%d rehide=%d", hWnd, nCmdShow, read, alpha, rehide);
-            if (rehide)
-                MakeTransparent(hWnd);
+            // Explorer may reset window styles while initializing. Re-apply transparency at the
+            // last moment before the window is actually shown.
+            if (IsTracked(hWnd))
+            {
+                BYTE alpha = 0;
+                DWORD flags = 0;
+                const bool read = GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) != FALSE;
+                const bool rehide = !AppRestored(hWnd);
+
+                Log("SHOWWINDOW hwnd=%p cmd=%d read=%d alpha=%d rehide=%d", hWnd, nCmdShow, read, alpha, rehide);
+                if (rehide)
+                    MakeTransparent(hWnd);
+            }
         }
 
         return g_showWindow(hWnd, nCmdShow);
+    }
+
+    BOOL WINAPI HookDestroyWindow(HWND hWnd)
+    {
+        const BOOL result = g_destroyWindow(hWnd);
+
+        // Release the handle only after the window is really gone, so a recycled HWND can never
+        // inherit the suppression and hide a window the user is supposed to see.
+        if (hWnd != nullptr)
+        {
+            ClearCondemned(hWnd);
+            Untrack(hWnd);
+        }
+
+        return result;
     }
 
     // Safety net: if the app dies between window creation and merging, don't leave an invisible
@@ -193,27 +282,71 @@ namespace
             Sleep(300);
 
             const DWORD now = GetTickCount();
-            std::vector<HWND> due;
+            const bool alive = PolicyAlive();
 
+            std::vector<std::pair<HWND, DWORD>> snapshot;
             EnterCriticalSection(&g_trackLock);
-            for (auto it = g_tracked.begin(); it != g_tracked.end();)
-            {
-                if (static_cast<int>(now - it->second) >= 0)
-                {
-                    due.push_back(it->first);
-                    it = g_tracked.erase(it);
-                }
-                else
-                {
-                    ++it;
-                }
-            }
+            snapshot = g_tracked;
             LeaveCriticalSection(&g_trackLock);
 
-            for (const HWND hWnd : due)
+            std::vector<HWND> reveal;
+            std::vector<HWND> drop;
+
+            // Query window state outside the lock: these are user32 calls and the hook
+            // callbacks contend on the same section.
+            for (const auto& [hWnd, until] : snapshot)
+            {
+                if (!IsWindow(hWnd))
+                {
+                    drop.push_back(hWnd);
+                }
+                else if (AppRestored(hWnd) || IsCondemned(hWnd))
+                {
+                    // The app either kept this window or already quit it. Neither is ours to
+                    // reveal, and waiting for the timeout would only risk a late flash.
+                    drop.push_back(hWnd);
+                }
+                else if (!alive || static_cast<int>(now - until) >= 0)
+                {
+                    reveal.push_back(hWnd);
+                    drop.push_back(hWnd);
+                }
+            }
+
+            if (!drop.empty())
+            {
+                EnterCriticalSection(&g_trackLock);
+                for (auto it = g_tracked.begin(); it != g_tracked.end();)
+                {
+                    bool remove = false;
+                    for (const HWND hWnd : drop)
+                        if (it->first == hWnd) { remove = true; break; }
+
+                    if (remove) it = g_tracked.erase(it);
+                    else ++it;
+                }
+                LeaveCriticalSection(&g_trackLock);
+            }
+
+            for (const HWND hWnd : reveal)
             {
                 if (IsWindow(hWnd))
                     SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
+            }
+
+            // DestroyWindow clears condemned slots precisely; this only catches windows that
+            // went away without it (e.g. the whole process exited).
+            if (g_policy != nullptr)
+            {
+                for (int i = 0; i < CondemnedSlots; ++i)
+                {
+                    const ULONGLONG value = g_policy->condemned[i];
+                    if (value == 0) continue;
+
+                    const HWND hWnd = reinterpret_cast<HWND>(static_cast<UINT_PTR>(value));
+                    if (!IsWindow(hWnd))
+                        InterlockedExchange64(reinterpret_cast<volatile LONG64*>(&g_policy->condemned[i]), 0);
+                }
             }
         }
     }
@@ -249,10 +382,15 @@ namespace
         const MH_STATUS showStatus = MH_CreateHookApi(L"user32.dll", "ShowWindow",
             reinterpret_cast<LPVOID>(&HookShowWindow),
             reinterpret_cast<LPVOID*>(&g_showWindow));
+        const MH_STATUS destroyStatus = MH_CreateHookApi(L"user32.dll", "DestroyWindow",
+            reinterpret_cast<LPVOID>(&HookDestroyWindow),
+            reinterpret_cast<LPVOID*>(&g_destroyWindow));
 
-        Log("INIT createHook=%d showHook=%d", createStatus, showStatus);
+        Log("INIT createHook=%d showHook=%d destroyHook=%d", createStatus, showStatus, destroyStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
 
+        // DestroyWindow only makes slot reuse prompt; the worker also reaps windows that are
+        // gone. Never let it take the whole hook down if it cannot be installed.
         MH_EnableHook(MH_ALL_HOOKS);
         CreateThread(nullptr, 0, UnhideWorker, nullptr, 0, nullptr);
         return 0;

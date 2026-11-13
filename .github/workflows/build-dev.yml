@@ -1,0 +1,86 @@
+name: Dev Build
+
+# Unsigned development build: same native hook + managed publish steps as the release
+# workflow, but without SignPath or the installer, so it runs on any fork.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ linyu-injection ]
+
+env:
+  PROJECT_NAME: ExplorerTabUtility
+
+jobs:
+  build-native:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S native/ExplorerTabUtility.Hook -B native/build -A x64
+        shell: pwsh
+
+      - name: Build native hook
+        run: cmake --build native/build --config Release
+        shell: pwsh
+
+      - name: Upload native hook
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-hook-x64
+          path: native/build/bin/ExplorerTabUtility.Hook.dll
+
+  build:
+    needs: build-native
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        framework: [ 'net9.0-windows', 'net481' ]
+      fail-fast: false
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download native hook
+        uses: actions/download-artifact@v4
+        with:
+          name: native-hook-x64
+          path: ${{ env.PROJECT_NAME }}
+
+      - name: Setup MSBuild Environments
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '17.0'
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Build Project
+        run: |
+          $outputDir = "../publish/${{ matrix.framework }}"
+          msbuild "${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}.csproj" /restore /t:Publish /p:Configuration=Release /p:TargetFramework=${{ matrix.framework }} /p:RuntimeIdentifier=win-x64 /p:PublishDir=$outputDir /p:DebugType=none
+        shell: pwsh
+
+      - name: Zip Artifacts
+        id: zip_artifacts
+        run: |
+          $frameworkName = if ("${{ matrix.framework }}" -eq "net9.0-windows") { "Net9.0" } else { "NetFW4.8.1" }
+          $zipName = "${{ env.PROJECT_NAME }}_dev_x64_${frameworkName}.zip"
+
+          $tempDir = "temp-$(New-Guid)"
+          New-Item -Path "$tempDir/${{ env.PROJECT_NAME }}" -ItemType Directory -Force | Out-Null
+          Copy-Item -Path "publish/${{ matrix.framework }}/*" -Destination "$tempDir/${{ env.PROJECT_NAME }}" -Recurse
+          Compress-Archive -Path "$tempDir/*" -DestinationPath $zipName
+          Remove-Item -Path $tempDir -Recurse -Force
+
+          echo "zipName=$zipName" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip_artifacts.outputs.zipName }}
+          path: ${{ steps.zip_artifacts.outputs.zipName }}

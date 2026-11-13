@@ -104,6 +104,19 @@ internal static class HookInjector
         }
     }
 
+    public static void CondemnWindow(nint hWnd)
+    {
+        try
+        {
+            _policy?.CondemnWindow(hWnd);
+            DiagLog.Write($"CONDEMN hwnd=0x{(long)hWnd:X}");
+        }
+        catch
+        {
+            // Never break window merging because of the hook.
+        }
+    }
+
     public static void EnsureInjectedForWindow(nint hWnd)
     {
         if (_policy == null || hWnd == 0) return;
