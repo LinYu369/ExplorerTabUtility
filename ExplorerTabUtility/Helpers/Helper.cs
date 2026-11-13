@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text;
 using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
@@ -263,6 +264,17 @@ public static class Helper
         };
     }
 
+    public static string GetWindowTitle(nint hWnd)
+    {
+        if (hWnd == 0) return string.Empty;
+
+        var length = WinApi.GetWindowTextLength(hWnd);
+        if (length <= 0) return string.Empty;
+
+        var buffer = new StringBuilder(length + 1);
+        WinApi.GetWindowText(hWnd, buffer, buffer.Capacity);
+        return buffer.ToString();
+    }
     public static bool IsExplorerEmptySpace(Point point)
     {
         var hr = WinApi.AccessibleObjectFromPoint(point, out var accObj, out var childId);

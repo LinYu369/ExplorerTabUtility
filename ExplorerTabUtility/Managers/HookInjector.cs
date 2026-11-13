@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using ExplorerTabUtility.WinAPI;
@@ -18,25 +17,10 @@ internal static class HookInjector
     private const string DllName = "ExplorerTabUtility.Hook.dll";
 
     private static readonly HashSet<int> Injected = new();
-    private static readonly HashSet<int> Failed = new();
     private static readonly object Sync = new();
     private static Timer? _timer;
     private static HookPolicy? _policy;
     private static string _dllPath = string.Empty;
-    private static bool? _lastEnabled;
-
-    private static void Log(string message)
-    {
-        try
-        {
-            File.AppendAllText(Path.Combine(Path.GetTempPath(), "ExplorerTabUtility-inject.log"),
-                $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Diagnostics only.
-        }
-    }
 
     public static void Start()
     {
@@ -56,8 +40,8 @@ internal static class HookInjector
             return;
         }
 
-        _timer = new Timer(_ => Tick(), null, 0, 1_000);
-        Log($"start dll={_dllPath}");
+        // A short interval keeps the gap small when Explorer restarts or spawns a new process.
+        _timer = new Timer(_ => Tick(), null, 0, 300);
     }
 
     public static void AllowNextWindow(int milliseconds = 3_000)
@@ -76,14 +60,8 @@ internal static class HookInjector
     {
         try
         {
-            var enabled = SettingsManager.IsWindowHookActive || SettingsManager.ReuseTabs;
-            _policy?.Write(enabled, heartbeat: true);
-
-            if (_lastEnabled != enabled)
-            {
-                _lastEnabled = enabled;
-                Log($"policy enabled={enabled}");
-            }
+            _policy?.Write(SettingsManager.IsWindowHookActive || SettingsManager.ReuseTabs,
+                heartbeat: true);
 
             Process[] processes;
             try
@@ -106,20 +84,7 @@ internal static class HookInjector
 
                     if (Inject(process.Id, _dllPath))
                     {
-                        lock (Sync)
-                        {
-                            Injected.Add(process.Id);
-                            Failed.Remove(process.Id);
-                        }
-                        Log($"injected pid={process.Id}");
-                    }
-                    else
-                    {
-                        lock (Sync)
-                        {
-                            if (Failed.Add(process.Id))
-                                Log($"inject failed pid={process.Id}");
-                        }
+                        lock (Sync) Injected.Add(process.Id);
                     }
                 }
                 catch
@@ -135,7 +100,6 @@ internal static class HookInjector
             lock (Sync)
             {
                 Injected.RemoveWhere(IsProcessGone);
-                Failed.RemoveWhere(IsProcessGone);
             }
         }
         catch

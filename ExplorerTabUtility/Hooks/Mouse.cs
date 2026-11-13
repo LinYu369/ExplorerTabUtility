@@ -38,6 +38,9 @@ public sealed class Mouse : IHook
 
         bool? isFileExplorerForeground = null;
         nint handle = 0;
+        string? windowTitle = null;
+        var windowTitleCaptured = false;
+
         foreach (var profile in _hotkeyProfiles)
         {
             // Skip disabled, empty or non mouse
@@ -61,18 +64,24 @@ public sealed class Mouse : IHook
                     handle = 0; // Reset handle if not File Explorer
                     continue;
                 }
+
+                if (!windowTitleCaptured)
+                {
+                    windowTitle = Helper.GetWindowTitle(handle);
+                    windowTitleCaptured = true;
+                }
             }
             
             // Queue the hotkey trigger in a separate thread.
 #if NET7_0_OR_GREATER
-            ThreadPool.QueueUserWorkItem(static s => s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle, s.Position)),
-                new State(handler, profile, handle, e.Position), false);
+            ThreadPool.QueueUserWorkItem(static s => s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle, s.Position, s.Title)),
+                new State(handler, profile, handle, e.Position, windowTitle), false);
 #else
             ThreadPool.QueueUserWorkItem(static state =>
             {
                 var s = (State)state!;
-                s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle, s.Position));
-            }, new State(handler, profile, handle, e.Position));
+                s.Handler.Invoke(new HotKeyEventArgs(s.Profile, s.Handle, s.Position, s.Title));
+            }, new State(handler, profile, handle, e.Position, windowTitle));
 #endif
         }
     }
@@ -105,11 +114,13 @@ public sealed class Mouse : IHook
         _lowLevelMouseHook.Dispose();
     }
 
-    private readonly struct State(Action<HotKeyEventArgs> handler, HotKeyProfile profile, nint handle, Point position)
+    private readonly struct State(Action<HotKeyEventArgs> handler, HotKeyProfile profile, nint handle,
+        Point position, string? title)
     {
         public readonly Action<HotKeyEventArgs> Handler = handler;
         public readonly HotKeyProfile Profile = profile;
         public readonly nint Handle = handle;
         public readonly Point Position = position;
+        public readonly string? Title = title;
     }
 }

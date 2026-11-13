@@ -71,15 +71,15 @@ public sealed class HookManager
                 break;
 
             case HotKeyAction.NavigateBack:
-                NavigateBackForward(e.ForegroundWindow, e.MousePosition, isForward: false);
+                NavigateBackForward(e.ForegroundWindow, e.MousePosition, e.WindowTitle, isForward: false);
                 break;
 
             case HotKeyAction.NavigateUp:
-                NavigateUp(e.ForegroundWindow, e.MousePosition);
+                NavigateUp(e.ForegroundWindow, e.MousePosition, e.WindowTitle);
                 break;
             
             case HotKeyAction.NavigateForward:
-                NavigateBackForward(e.ForegroundWindow, e.MousePosition, isForward: true);
+                NavigateBackForward(e.ForegroundWindow, e.MousePosition, e.WindowTitle, isForward: true);
                 break;
 
             case HotKeyAction.ToggleReuseTabs:
@@ -122,23 +122,46 @@ public sealed class HookManager
         if (SettingsManager.IsMouseHookActive) StartMouseHook();
         if (SettingsManager.IsKeyboardHookActive) StartKeyboardHook();
     }
-    private void NavigateBackForward(nint foregroundWindow, Point? mousePosition, bool isForward)
+    private void NavigateBackForward(nint foregroundWindow, Point? mousePosition, string? windowTitle,
+        bool isForward)
     {
         if (foregroundWindow == 0) return;
 
         if (mousePosition is not { } position)
+        {
             _windowHook.NavigateBackForward(foregroundWindow, isForward);
-        else if (Helper.IsExplorerEmptySpace(position))
+            return;
+        }
+
+        // The gesture is handled asynchronously; drop it if Explorer already navigated (for example
+        // the double-click opened a folder), otherwise we would navigate back from the wrong place.
+        if (!IsSameExplorerView(foregroundWindow, windowTitle)) return;
+
+        if (Helper.IsExplorerEmptySpace(position))
             KeyboardSimulator.ModifiedKeyStroke(VirtualKey.Alt, isForward ? VirtualKey.Right : VirtualKey.Left);
     }
-    private void NavigateUp(nint foregroundWindow, Point? mousePosition)
+    private void NavigateUp(nint foregroundWindow, Point? mousePosition, string? windowTitle)
     {
         if (foregroundWindow == 0) return;
 
         if (mousePosition is not { } position)
+        {
             KeyboardSimulator.ModifiedKeyStroke(VirtualKey.Alt, VirtualKey.Up);
-        else if (Helper.IsExplorerEmptySpace(position))
+            return;
+        }
+
+        if (!IsSameExplorerView(foregroundWindow, windowTitle)) return;
+
+        if (Helper.IsExplorerEmptySpace(position))
             KeyboardSimulator.ModifiedKeyStroke(VirtualKey.Alt, VirtualKey.Up);
+    }
+    private static bool IsSameExplorerView(nint foregroundWindow, string? windowTitle)
+    {
+        if (WinApi.GetForegroundWindow() != foregroundWindow) return false;
+
+        if (windowTitle == null) return true;
+
+        return string.Equals(Helper.GetWindowTitle(foregroundWindow), windowTitle);
     }
 
     private async Task SnapForegroundWindow(HotKeyAction direction, int delay = 0)
