@@ -25,10 +25,10 @@ internal static class TaskbarHelper
     private static ITaskbarList? _taskbar;
     private static bool _initialized;
 
-    public static void DeleteTab(nint hWnd) => Post(t => t.DeleteTab(hWnd), $"del 0x{hWnd:X}");
-    public static void AddTab(nint hWnd) => Post(t => t.AddTab(hWnd), $"add 0x{hWnd:X}");
+    public static void DeleteTab(nint hWnd) => Post(t => t.DeleteTab(hWnd));
+    public static void AddTab(nint hWnd) => Post(t => t.AddTab(hWnd));
 
-    private static void Post(Action<ITaskbarList> action, string description)
+    private static void Post(Action<ITaskbarList> action)
     {
         var dispatcher = Application.Current?.Dispatcher;
         if (dispatcher == null) return;
@@ -48,11 +48,10 @@ internal static class TaskbarHelper
                     }
 
                     action(_taskbar!);
-                    DiagLog.Write($"TASKBAR {description}");
                 }
-                catch (Exception ex)
+                catch
                 {
-                    DiagLog.Write($"TASKBAR {description} failed: {ex.GetType().Name}");
+                    // Taskbar bookkeeping must never break window merging.
                 }
             }), DispatcherPriority.Send);
         }

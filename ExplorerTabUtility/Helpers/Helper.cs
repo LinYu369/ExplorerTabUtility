@@ -384,8 +384,6 @@ public static class Helper
     }
     public static void HideWindow(nint hWnd, bool keepTheme = false)
     {
-        DiagLog.Write($"HIDE hwnd=0x{hWnd:X} cached={HiddenWindows.ContainsKey(hWnd)} keepTheme={keepTheme} visible={WinApi.IsWindowVisible(hWnd)}");
-
         if (!HiddenWindows.ContainsKey(hWnd))
         {
             RECT? originalPos = null;
@@ -401,8 +399,8 @@ public static class Helper
         UpdateWindowLayered(hWnd, remove: false);
         WinApi.SetLayeredWindowAttributes(hWnd, 0, 0, WinApi.LWA_ALPHA);
 
-        var exStyle = WinApi.GetWindowLong(hWnd, WinApi.GWL_EXSTYLE);
-        var hasLayered = (exStyle & WinApi.WS_EX_LAYERED) != 0;
+        // Verify the transparency actually took effect; changing another process's window styles
+        // can be rejected, in which case we fall back to a hard hide below.
         var alphaRead = WinApi.GetLayeredWindowAttributes(hWnd, out _, out var alpha, out var alphaFlags);
         var alphaApplied = alphaRead && (alphaFlags & (uint)WinApi.LWA_ALPHA) != 0 && alpha == 0;
 
@@ -427,21 +425,14 @@ public static class Helper
         }
 
         TaskbarHelper.DeleteTab(hWnd);
-
-        DiagLog.Write($"HIDE done hwnd=0x{hWnd:X} ex=0x{exStyle:X} layered={hasLayered} alphaRead={alphaRead} alpha={alpha} flags=0x{alphaFlags:X} fallback={!alphaApplied} visible={WinApi.IsWindowVisible(hWnd)}");
     }
     public static bool ShowWindow(nint hWnd, bool removeCache)
     {
-        DiagLog.Write($"SHOWWIN hwnd=0x{hWnd:X} removeCache={removeCache} cached={HiddenWindows.ContainsKey(hWnd)}");
-
         if (!HiddenWindows.TryGetValue(hWnd, out var originalPos))
             return false;
 
         if (removeCache)
             HiddenWindows.TryRemove(hWnd, out _);
-
-        var cloak = 0;
-        WinApi.DwmSetWindowAttribute(hWnd, WinApi.DWMWA_CLOAK, ref cloak, sizeof(int));
 
         TaskbarHelper.AddTab(hWnd);
 
