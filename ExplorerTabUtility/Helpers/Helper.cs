@@ -426,6 +426,8 @@ public static class Helper
             WinApi.SetWindowPos(hWnd, 0, -32_000, -32_000, 0, 0, hideFlags);
         }
 
+        TaskbarHelper.DeleteTab(hWnd);
+
         DiagLog.Write($"HIDE done hwnd=0x{hWnd:X} ex=0x{exStyle:X} layered={hasLayered} alphaRead={alphaRead} alpha={alpha} flags=0x{alphaFlags:X} fallback={!alphaApplied} visible={WinApi.IsWindowVisible(hWnd)}");
     }
     public static bool ShowWindow(nint hWnd, bool removeCache)
@@ -440,6 +442,8 @@ public static class Helper
 
         var cloak = 0;
         WinApi.DwmSetWindowAttribute(hWnd, WinApi.DWMWA_CLOAK, ref cloak, sizeof(int));
+
+        TaskbarHelper.AddTab(hWnd);
 
         if (originalPos != null) // keep theme
         {
