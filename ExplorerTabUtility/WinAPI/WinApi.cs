@@ -77,6 +77,9 @@ public static class WinApi
     [DllImport("dwmapi.dll")]
     public static extern int DwmGetWindowAttribute(nint hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool GetLayeredWindowAttributes(nint hwnd, out uint pcrKey, out byte pbAlpha, out uint pdwFlags);
+
     [DllImport("user32.dll")]
     public static extern nint GetForegroundWindow();
 
