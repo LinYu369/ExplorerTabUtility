@@ -329,19 +329,27 @@ namespace
             // leave a flashed window invisible forever.
             const bool restored = AppRestored(hWnd);
             const bool visible = IsWindowVisible(hWnd) != FALSE;
-            BYTE alpha = 0;
-            DWORD alphaFlags = 0;
-            const bool alphaRead =
-                GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &alphaFlags) != FALSE;
-            const bool transparent =
-                alphaRead && (alphaFlags & LWA_ALPHA) != 0 && alpha == 0;
+            const LONG exStyleNow = GetWindowLongW(hWnd, GWL_EXSTYLE);
+            const bool layered = (exStyleNow & WS_EX_LAYERED) != 0;
             const bool condemned = IsCondemned(hWnd);
-            // A visible window with no alpha-0 layer was already released/shown by the app.
-            const bool keep = restored || condemned || (visible && !transparent);
-            if (keep)
+
+            if (condemned)
             {
-                Log("CREATE keep hwnd=%p visible=%d restored=%d transparent=%d condemned=%d",
-                    hWnd, visible, restored, transparent, condemned);
+                Log("CREATE condemned-during-create hwnd=%p", hWnd);
+            }
+            else if (restored || (visible && !layered))
+            {
+                // The app kept this window during CreateWindowExW. The tear-out show was
+                // suppressed with DWM cloak; undo it now or the taskbar button and thumbnail
+                // stay visible while the window itself can never be shown.
+                ConsumeRelease(hWnd);
+                SetCloaked(hWnd, false);
+                SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
+                const LONG currentExStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
+                if ((currentExStyle & WS_EX_NOACTIVATE) != 0)
+                    SetWindowLongW(hWnd, GWL_EXSTYLE, currentExStyle & ~WS_EX_NOACTIVATE);
+                Log("CREATE keep hwnd=%p visible=%d restored=%d layered=%d", hWnd, visible,
+                    restored, layered);
             }
             else
             {
@@ -733,7 +741,7 @@ namespace
             reinterpret_cast<LPVOID>(&HookSetWindowPlacement),
             reinterpret_cast<LPVOID*>(&g_setWindowPlacement));
 
-        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d swlHook=%d swlpHook=%d swpHook=%d hookVersion=4",
+        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d swlHook=%d swlpHook=%d swpHook=%d hookVersion=5",
             createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus, ntShowStatus,
             ntPosStatus, swlStatus, swlpStatus, swpStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
