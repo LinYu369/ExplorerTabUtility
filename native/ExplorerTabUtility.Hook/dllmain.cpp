@@ -57,8 +57,23 @@ namespace
     using DestroyWindow_t = BOOL(WINAPI*)(HWND);
     DestroyWindow_t g_destroyWindow = nullptr;
 
+    // Windows can be made visible by changing GWL_STYLE or by SetWindowPlacement instead of
+    // going through any ShowWindow/SetWindowPos export.
+    using SetWindowLongW_t = LONG(WINAPI*)(HWND, int, LONG);
+    SetWindowLongW_t g_setWindowLongW = nullptr;
+
+    using SetWindowLongPtrW_t = LONG_PTR(WINAPI*)(HWND, int, LONG_PTR);
+    SetWindowLongPtrW_t g_setWindowLongPtrW = nullptr;
+
+    using SetWindowPlacement_t = BOOL(WINAPI*)(HWND, const WINDOWPLACEMENT*);
+    SetWindowPlacement_t g_setWindowPlacement = nullptr;
+
     CRITICAL_SECTION g_trackLock;
     std::vector<HWND> g_tracked;
+
+    // Set while the hooked CreateWindowExW is building a temporary CabinetWClass window.
+    // Explorer shows the window *inside* that call, before the post-create code has tracked it.
+    thread_local bool t_creatingTarget = false;
 
     void Log(const char* format, ...)
     {
@@ -113,6 +128,20 @@ namespace
         LeaveCriticalSection(&g_trackLock);
     }
 
+    bool IsCabinetWindow(HWND hWnd)
+    {
+        wchar_t className[64];
+        return hWnd != nullptr && GetClassNameW(hWnd, className, 64) > 0 &&
+            _wcsicmp(className, L"CabinetWClass") == 0;
+    }
+
+    // A temporary window that is still inside the hooked CreateWindowExW call. It is not in
+    // g_tracked yet, but Explorer may already show it and start the open animation.
+    bool IsPretrackedTarget(HWND hWnd)
+    {
+        return t_creatingTarget && !IsTracked(hWnd) && IsCabinetWindow(hWnd);
+    }
+
     void MakeTransparent(HWND hWnd)
     {
         const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
@@ -141,6 +170,15 @@ namespace
         if (DwmGetWindowAttribute(hWnd, DwmwaCloaked, &cloaked, sizeof(cloaked)) != S_OK)
             return false;
         return cloaked != 0;
+    }
+
+    void SuppressPretracked(HWND hWnd, const char* api)
+    {
+        MakeTransparent(hWnd);
+        if (!IsCloaked(hWnd))
+            SetCloaked(hWnd, true);
+
+        Log("%s hwnd=%p pretracked=1 suppressed=1", api, hWnd);
     }
 
     // The app releases a window by setting alpha back to 255, plus an explicit released slot.
@@ -272,8 +310,14 @@ namespace
                 exStyle |= WS_EX_LAYERED | WS_EX_NOACTIVATE;
         }
 
+        const bool previousCreatingTarget = t_creatingTarget;
+        if (hide)
+            t_creatingTarget = true;
+
         const HWND hWnd = g_createWindowExW(exStyle, className, windowName, style, x, y, width,
             height, parent, menu, instance, param);
+
+        t_creatingTarget = previousCreatingTarget;
 
         if (hide && hWnd != nullptr)
         {
@@ -306,13 +350,29 @@ namespace
         if (hWnd == nullptr) return nCmdShow;
         if (ConsumeRelease(hWnd)) return nCmdShow;
 
+        const bool tracked = IsTracked(hWnd);
+        const bool pretracked = !tracked && IsPretrackedTarget(hWnd);
+        if (!tracked && !pretracked) return nCmdShow;
+
+        if (pretracked)
+        {
+            if (nCmdShow != SW_HIDE)
+            {
+                SuppressPretracked(hWnd, api);
+                return SW_HIDE;
+            }
+
+            MakeTransparent(hWnd);
+            if (!IsCloaked(hWnd))
+                SetCloaked(hWnd, true);
+            return nCmdShow;
+        }
+
         if (nCmdShow != SW_HIDE && IsCondemned(hWnd) && !AppRestored(hWnd))
         {
             Log("%s hwnd=%p cmd=%d condemned=1 suppressed=1", api, hWnd, nCmdShow);
             return SW_HIDE;
         }
-
-        if (!IsTracked(hWnd)) return nCmdShow;
 
         if (AppRestored(hWnd))
         {
@@ -360,13 +420,21 @@ namespace
         if (hWnd == nullptr || (uFlags & SWP_SHOWWINDOW) == 0) return uFlags;
         if (ConsumeRelease(hWnd)) return uFlags;
 
+        const bool tracked = IsTracked(hWnd);
+        const bool pretracked = !tracked && IsPretrackedTarget(hWnd);
+        if (!tracked && !pretracked) return uFlags;
+
+        if (pretracked)
+        {
+            SuppressPretracked(hWnd, api);
+            return (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+        }
+
         if (IsCondemned(hWnd) && !AppRestored(hWnd))
         {
             Log("%s hwnd=%p flags=0x%x condemned=1 suppressed=1", api, hWnd, uFlags);
             return (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
         }
-
-        if (!IsTracked(hWnd)) return uFlags;
 
         if (AppRestored(hWnd))
         {
@@ -397,6 +465,41 @@ namespace
     {
         uFlags = FilterSetWindowPos(hWnd, uFlags, "NTUSER_SETWINDOWPOS");
         return g_ntUserSetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+    }
+
+    LONG WINAPI HookSetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong)
+    {
+        if (nIndex == GWL_STYLE && (dwNewLong & WS_VISIBLE) != 0 &&
+            IsPretrackedTarget(hWnd))
+        {
+            SuppressPretracked(hWnd, "SETWINDOWLONG");
+            dwNewLong &= ~WS_VISIBLE;
+        }
+        return g_setWindowLongW(hWnd, nIndex, dwNewLong);
+    }
+
+    LONG_PTR WINAPI HookSetWindowLongPtrW(HWND hWnd, int nIndex, LONG_PTR dwNewLong)
+    {
+        if (nIndex == GWL_STYLE && (dwNewLong & WS_VISIBLE) != 0 &&
+            IsPretrackedTarget(hWnd))
+        {
+            SuppressPretracked(hWnd, "SETWINDOWLONGPTR");
+            dwNewLong &= ~WS_VISIBLE;
+        }
+        return g_setWindowLongPtrW(hWnd, nIndex, dwNewLong);
+    }
+
+    BOOL WINAPI HookSetWindowPlacement(HWND hWnd, const WINDOWPLACEMENT* placement)
+    {
+        if (placement != nullptr && placement->showCmd != SW_HIDE &&
+            IsPretrackedTarget(hWnd))
+        {
+            WINDOWPLACEMENT hidden = *placement;
+            hidden.showCmd = SW_HIDE;
+            SuppressPretracked(hWnd, "SETWINDOWPLACEMENT");
+            return g_setWindowPlacement(hWnd, &hidden);
+        }
+        return g_setWindowPlacement(hWnd, placement);
     }
 
     BOOL WINAPI HookDestroyWindow(HWND hWnd)
@@ -595,10 +698,19 @@ namespace
         const MH_STATUS ntPosStatus = MH_CreateHookApi(L"win32u.dll", "NtUserSetWindowPos",
             reinterpret_cast<LPVOID>(&HookNtUserSetWindowPos),
             reinterpret_cast<LPVOID*>(&g_ntUserSetWindowPos));
+        const MH_STATUS swlStatus = MH_CreateHookApi(L"user32.dll", "SetWindowLongW",
+            reinterpret_cast<LPVOID>(&HookSetWindowLongW),
+            reinterpret_cast<LPVOID*>(&g_setWindowLongW));
+        const MH_STATUS swlpStatus = MH_CreateHookApi(L"user32.dll", "SetWindowLongPtrW",
+            reinterpret_cast<LPVOID>(&HookSetWindowLongPtrW),
+            reinterpret_cast<LPVOID*>(&g_setWindowLongPtrW));
+        const MH_STATUS swpStatus = MH_CreateHookApi(L"user32.dll", "SetWindowPlacement",
+            reinterpret_cast<LPVOID>(&HookSetWindowPlacement),
+            reinterpret_cast<LPVOID*>(&g_setWindowPlacement));
 
-        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d",
+        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d swlHook=%d swlpHook=%d swpHook=%d",
             createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus, ntShowStatus,
-            ntPosStatus);
+            ntPosStatus, swlStatus, swlpStatus, swpStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
 
         // SetWindowPos and DestroyWindow widen coverage; neither may take the whole hook down
