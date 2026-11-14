@@ -44,6 +44,13 @@ namespace
     using ShowWindowAsync_t = BOOL(WINAPI*)(HWND, int);
     ShowWindowAsync_t g_showWindowAsync = nullptr;
 
+    // Explorer sometimes shows windows through win32u directly, bypassing every user32 export.
+    using NtUserShowWindow_t = BOOL(NTAPI*)(HWND, int);
+    NtUserShowWindow_t g_ntUserShowWindow = nullptr;
+
+    using NtUserSetWindowPos_t = BOOL(NTAPI*)(HWND, HWND, int, int, int, int, UINT);
+    NtUserSetWindowPos_t g_ntUserSetWindowPos = nullptr;
+
     using SetWindowPos_t = BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT);
     SetWindowPos_t g_setWindowPos = nullptr;
 
@@ -122,10 +129,10 @@ namespace
     constexpr DWORD DwmwaCloak = 13;
     constexpr DWORD DwmwaCloaked = 14;
 
-    void SetCloaked(HWND hWnd, bool cloak)
+    HRESULT SetCloaked(HWND hWnd, bool cloak)
     {
         const BOOL value = cloak ? TRUE : FALSE;
-        DwmSetWindowAttribute(hWnd, DwmwaCloak, &value, sizeof(value));
+        return DwmSetWindowAttribute(hWnd, DwmwaCloak, &value, sizeof(value));
     }
 
     bool IsCloaked(HWND hWnd)
@@ -273,7 +280,8 @@ namespace
             // Kill every visual trace before Explorer gets a chance to show the window: no
             // content (layered alpha 0), no DWM composition, and no open animation (cloak).
             MakeTransparent(hWnd);
-            SetCloaked(hWnd, true);
+            const HRESULT cloakResult = SetCloaked(hWnd, true);
+            Log("CREATE cloak=0x%08X", cloakResult);
 
             // A window created with WS_VISIBLE is already on its way to the screen; take it
             // back before it can start the open animation.
@@ -317,8 +325,14 @@ namespace
         if (!IsCloaked(hWnd))
             SetCloaked(hWnd, true);
 
+        // Never let the temporary window become visible: that is what starts the DWM open
+        // animation (and the accent border of an activating maximized window). The app
+        // releases the handle before showing a window it wants to keep.
         if (nCmdShow != SW_HIDE)
-            Log("%s hwnd=%p cmd=%d tracked=1 cloak=1", api, hWnd, nCmdShow);
+        {
+            Log("%s hwnd=%p cmd=%d tracked=1 suppressed=1", api, hWnd, nCmdShow);
+            return SW_HIDE;
+        }
 
         return nCmdShow;
     }
@@ -334,40 +348,55 @@ namespace
         return g_showWindowAsync(hWnd, FilterShow(hWnd, nCmdShow, "SHOWWINDOWASYNC"));
     }
 
+    // The lowest-level show path. Explorer bypasses every user32 export on this Windows build,
+    // so this hook is what actually keeps the temporary window from becoming visible.
+    BOOL NTAPI HookNtUserShowWindow(HWND hWnd, int nCmdShow)
+    {
+        return g_ntUserShowWindow(hWnd, FilterShow(hWnd, nCmdShow, "NTUSER_SHOWWINDOW"));
+    }
+
+    UINT FilterSetWindowPos(HWND hWnd, UINT uFlags, const char* api)
+    {
+        if (hWnd == nullptr || (uFlags & SWP_SHOWWINDOW) == 0) return uFlags;
+        if (ConsumeRelease(hWnd)) return uFlags;
+
+        if (IsCondemned(hWnd) && !AppRestored(hWnd))
+        {
+            Log("%s hwnd=%p flags=0x%x condemned=1 suppressed=1", api, hWnd, uFlags);
+            return (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+        }
+
+        if (!IsTracked(hWnd)) return uFlags;
+
+        if (AppRestored(hWnd))
+        {
+            SetCloaked(hWnd, false);
+            Untrack(hWnd);
+            return uFlags;
+        }
+
+        MakeTransparent(hWnd);
+        if (!IsCloaked(hWnd))
+            SetCloaked(hWnd, true);
+
+        Log("%s hwnd=%p flags=0x%x tracked=1 suppressed=1", api, hWnd, uFlags);
+        return (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
+    }
+
     // Explorer does not show every window through ShowWindow: SetWindowPos(SWP_SHOWWINDOW) is
     // the other common path, and it bypasses the hook above entirely.
     BOOL WINAPI HookSetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx, int cy,
         UINT uFlags)
     {
-        if (hWnd != nullptr && (uFlags & SWP_SHOWWINDOW) != 0)
-        {
-            if (ConsumeRelease(hWnd))
-                return g_setWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
-
-            if (IsCondemned(hWnd) && !AppRestored(hWnd))
-            {
-                Log("SETWINDOWPOS hwnd=%p flags=0x%x condemned=1 suppressed=1", hWnd, uFlags);
-                uFlags = (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
-            }
-            else if (IsTracked(hWnd))
-            {
-                if (AppRestored(hWnd))
-                {
-                    SetCloaked(hWnd, false);
-                    Untrack(hWnd);
-                }
-                else
-                {
-                    MakeTransparent(hWnd);
-                    if (!IsCloaked(hWnd))
-                        SetCloaked(hWnd, true);
-
-                    Log("SETWINDOWPOS hwnd=%p flags=0x%x tracked=1 cloak=1", hWnd, uFlags);
-                }
-            }
-        }
-
+        uFlags = FilterSetWindowPos(hWnd, uFlags, "SETWINDOWPOS");
         return g_setWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
+    }
+
+    BOOL NTAPI HookNtUserSetWindowPos(HWND hWnd, HWND hWndInsertAfter, int X, int Y, int cx,
+        int cy, UINT uFlags)
+    {
+        uFlags = FilterSetWindowPos(hWnd, uFlags, "NTUSER_SETWINDOWPOS");
+        return g_ntUserSetWindowPos(hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags);
     }
 
     BOOL WINAPI HookDestroyWindow(HWND hWnd)
@@ -424,6 +453,10 @@ namespace
 
                 if (ConsumeRelease(hWnd))
                 {
+                    // The app may keep a window after the hook already hid it. The service
+                    // release uncloaks it; make sure it is actually visible now.
+                    if (!IsWindowVisible(hWnd))
+                        g_showWindow(hWnd, SW_SHOWNOACTIVATE);
                     drop.push_back(hWnd);
                     continue;
                 }
@@ -554,8 +587,18 @@ namespace
             reinterpret_cast<LPVOID>(&HookDestroyWindow),
             reinterpret_cast<LPVOID*>(&g_destroyWindow));
 
-        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d",
-            createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus);
+        // Explorer's internal show path goes through win32u, not through any user32 export.
+        // These are optional: the user32 hooks and the worker still work if they fail.
+        const MH_STATUS ntShowStatus = MH_CreateHookApi(L"win32u.dll", "NtUserShowWindow",
+            reinterpret_cast<LPVOID>(&HookNtUserShowWindow),
+            reinterpret_cast<LPVOID*>(&g_ntUserShowWindow));
+        const MH_STATUS ntPosStatus = MH_CreateHookApi(L"win32u.dll", "NtUserSetWindowPos",
+            reinterpret_cast<LPVOID>(&HookNtUserSetWindowPos),
+            reinterpret_cast<LPVOID*>(&g_ntUserSetWindowPos));
+
+        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d",
+            createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus, ntShowStatus,
+            ntPosStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
 
         // SetWindowPos and DestroyWindow widen coverage; neither may take the whole hook down
