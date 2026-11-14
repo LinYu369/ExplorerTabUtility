@@ -514,6 +514,14 @@ public class ExplorerWatcher : IHook
                 if (!SettingsManager.HaveThemeIssue)
                     Helper.UpdateWindowLayered(hWnd, remove: true);
 
+                // A kept window (detached tab, intentional new window) must not stay behind the
+                // window it came from; the old window is usually still in the foreground. Only
+                // single-tab windows are brought forward: the main window must not steal focus
+                // from the window that was just detached.
+                if (hWnd != 0 && hWnd != _mainWindowHandle &&
+                    Helper.GetAllExplorerTabs(hWnd).Take(2).Count() == 1)
+                    WinApi.RestoreWindowToForeground(hWnd);
+
                 // OnWindowShown might fire after ShellWindowRegistered and hide it again, keep the cache, wait a bit, then remove it.
                 _ = Task.Delay(3000).ContinueWith(t => Helper.HiddenWindows.TryRemove(hWnd, out _), TaskScheduler.Default);
             }
