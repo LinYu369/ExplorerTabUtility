@@ -34,6 +34,8 @@ public sealed class HookManager
         profileManager.KeybindingsHookStopped += KeybindingStopped;
         _keyboardHook.OnHotKeyProfileTriggered += OnHotKeyProfileTriggered;
         _mouseHook.OnHotKeyProfileTriggered += OnHotKeyProfileTriggered;
+        _mouseHook.OnTabDragDetected += _windowHook.AcceptNativeTabDrag;
+        _mouseHook.OnTabDragEnded += _windowHook.EndNativeTabDrag;
         _windowHook.OnShellInitialized += () => OnShellInitialized?.Invoke();
         System.Windows.Application.Current.SessionEnding += (_, _) => Dispose();
     }

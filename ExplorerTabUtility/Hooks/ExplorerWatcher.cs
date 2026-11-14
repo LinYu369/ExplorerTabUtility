@@ -30,6 +30,8 @@ public class ExplorerWatcher : IHook
     private ShellPathComparer _shellPathComparer = null!;
     private StaTaskScheduler _staTaskScheduler = null!;
     private nint _mainWindowHandle;
+    private int _nativeDetachUntil;
+    private nint _nativeDetachTabHandle;
     private readonly ConcurrentDictionary<nint, byte> _processedHWnds = new();
     private readonly DualKeyDictionary<InternetExplorer, nint?, WindowInfo> _windowEntryDict = [];
     private readonly List<WindowRecord> _closedWindows = new();
@@ -333,6 +335,30 @@ public class ExplorerWatcher : IHook
         if (Helper.IsFileExplorerWindow(windowHandle))
             _mainWindowHandle = windowHandle;
     }
+    public void AcceptNativeTabDrag(nint tabHandle)
+    {
+        _nativeDetachTabHandle = tabHandle;
+        Volatile.Write(ref _nativeDetachUntil, unchecked(Environment.TickCount + 3_000));
+        DiagLog.Write($"DRAG start tab=0x{(long)tabHandle:X}");
+    }
+    public void EndNativeTabDrag()
+    {
+        if (Volatile.Read(ref _nativeDetachUntil) == 0) return;
+
+        // The new window is created around the drop; keep the notice short so a later normal
+        // folder open is not mistaken for the tear-out.
+        Volatile.Write(ref _nativeDetachUntil, unchecked(Environment.TickCount + 1_500));
+        DiagLog.Write("DRAG end");
+    }
+    private bool ConsumeNativeDetach()
+    {
+        var until = Volatile.Read(ref _nativeDetachUntil);
+        if (until == 0 || unchecked(Environment.TickCount - until) >= 0) return false;
+
+        Interlocked.Exchange(ref _nativeDetachUntil, 0);
+        _nativeDetachTabHandle = 0;
+        return true;
+    }
     public void NavigateBackForward(nint windowHandle, bool isForward)
     {
         var activeTabHandle = GetActiveTabHandle(windowHandle);
@@ -451,16 +477,23 @@ public class ExplorerWatcher : IHook
             // Check if it is a detached/reattached tab before deciding to hide or merge it.
             // A little extra margin: the fallback window can take a while to register on a busy system.
             var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow, 3_000);
-            var keepAsWindow = isRecentlyClosed && closedWindow?.KeepWindow == true;
+
+            var tabs = Helper.GetAllExplorerTabs(hWnd).Take(2).ToArray();
+            var isSingleTab = tabs.Length == 1;
+
+            // Native tear-out: the mouse hook saw a drag start on a tab and the new window is
+            // the single-tab window that received it. It must stay a window, not a tab.
+            var nativeDetach = isSingleTab && ConsumeNativeDetach();
+            var keepAsWindow = (isRecentlyClosed && closedWindow?.KeepWindow == true) || nativeDetach;
 
             // Check if this is a single tab window and there are other windows
             var shouldReopenAsTab = (_isForcingTabs || _reuseTabs) &&
                                     !keepAsWindow &&
                                     _windowEntryDict.Count > 1 &&
                                     hWnd != _mainWindowHandle &&
-                                    Helper.GetAllExplorerTabs(hWnd).Take(2).Count() == 1;
+                                    isSingleTab;
 
-            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed} keepWindow={keepAsWindow}");
+            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed} keepWindow={keepAsWindow} nativeDetach={nativeDetach}");
 
             if (shouldReopenAsTab)
                 Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
