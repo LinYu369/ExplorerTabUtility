@@ -26,7 +26,7 @@ target_include_directories(minhook PRIVATE
 )
 
 add_library(ExplorerTabUtility.Hook SHARED dllmain.cpp)
-target_link_libraries(ExplorerTabUtility.Hook PRIVATE minhook user32)
+target_link_libraries(ExplorerTabUtility.Hook PRIVATE minhook user32 dwmapi)
 
 set_target_properties(ExplorerTabUtility.Hook PROPERTIES
     OUTPUT_NAME "ExplorerTabUtility.Hook"

@@ -452,6 +452,11 @@ public static class Helper
         // otherwise it treats the restore below as another show it has to undo.
         HookInjector.ReleaseWindow(hWnd);
 
+        // The hook now hides (and DWM-cloaks) a temporary window until the app decides to keep
+        // it. The release above unblocks the show; make sure the window actually appears.
+        if (!WinApi.IsWindowVisible(hWnd))
+            WinApi.ShowWindow(hWnd, WinApi.SW_SHOWNOACTIVATE);
+
         TaskbarHelper.AddTab(hWnd);
 
         if (wasHidden && originalPos != null) // keep theme

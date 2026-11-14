@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <dwmapi.h>
 #include <cstdio>
 #include <cstdarg>
 #include <vector>
@@ -39,6 +40,9 @@ namespace
 
     using ShowWindow_t = BOOL(WINAPI*)(HWND, int);
     ShowWindow_t g_showWindow = nullptr;
+
+    using ShowWindowAsync_t = BOOL(WINAPI*)(HWND, int);
+    ShowWindowAsync_t g_showWindowAsync = nullptr;
 
     using SetWindowPos_t = BOOL(WINAPI*)(HWND, HWND, int, int, int, int, UINT);
     SetWindowPos_t g_setWindowPos = nullptr;
@@ -109,6 +113,27 @@ namespace
             SetWindowLongW(hWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
 
         SetLayeredWindowAttributes(hWnd, 0, 0, LWA_ALPHA);
+    }
+
+    // Layered transparency only stops the window from painting. DWM still composes the window
+    // frame and plays the shell's open animation. A cloaked window is not composed at all, so
+    // the temporary window never animates on screen regardless of which code path shows it.
+    // Use explicit attribute ids so the hook builds with older SDK headers as well.
+    constexpr DWORD DwmwaCloak = 13;
+    constexpr DWORD DwmwaCloaked = 14;
+
+    void SetCloaked(HWND hWnd, bool cloak)
+    {
+        const BOOL value = cloak ? TRUE : FALSE;
+        DwmSetWindowAttribute(hWnd, DwmwaCloak, &value, sizeof(value));
+    }
+
+    bool IsCloaked(HWND hWnd)
+    {
+        int cloaked = 0;
+        if (DwmGetWindowAttribute(hWnd, DwmwaCloaked, &cloaked, sizeof(cloaked)) != S_OK)
+            return false;
+        return cloaked != 0;
     }
 
     // The app releases a window by setting alpha back to 255, plus an explicit released slot.
@@ -190,6 +215,7 @@ namespace
 
         if (found)
         {
+            SetCloaked(hWnd, false);
             Untrack(hWnd);
             // The window is meant to be used now, so let it take focus again.
             const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
@@ -244,8 +270,15 @@ namespace
 
         if (hide && hWnd != nullptr)
         {
-            // Make it transparent immediately, still before the window is first shown.
+            // Kill every visual trace before Explorer gets a chance to show the window: no
+            // content (layered alpha 0), no DWM composition, and no open animation (cloak).
             MakeTransparent(hWnd);
+            SetCloaked(hWnd, true);
+
+            // A window created with WS_VISIBLE is already on its way to the screen; take it
+            // back before it can start the open animation.
+            if ((style & WS_VISIBLE) != 0)
+                g_showWindow(hWnd, SW_HIDE);
 
             EnterCriticalSection(&g_trackLock);
             g_tracked.push_back(hWnd);
@@ -255,40 +288,50 @@ namespace
         return hWnd;
     }
 
-    BOOL WINAPI HookShowWindow(HWND hWnd, int nCmdShow)
+    // Returns the command that should actually be forwarded. A tracked window is a temporary
+    // window the app has not decided about yet. It may still be shown by Explorer (some show
+    // paths bypass our hooks), so it is made transparent AND DWM-cloaked before the show
+    // reaches the window: a cloaked window is never composed, so no open animation is played.
+    // The app releases the handle when it wants to keep the window.
+    int FilterShow(HWND hWnd, int nCmdShow, const char* api)
     {
-        if (hWnd != nullptr)
+        if (hWnd == nullptr) return nCmdShow;
+        if (ConsumeRelease(hWnd)) return nCmdShow;
+
+        if (nCmdShow != SW_HIDE && IsCondemned(hWnd) && !AppRestored(hWnd))
         {
-            if (ConsumeRelease(hWnd))
-                return g_showWindow(hWnd, nCmdShow);
-
-            // The app merged this window into a tab and quit it. Explorer still shows it once
-            // while tearing it down, which activates it and puts it on screen and in the
-            // taskbar. Restoring transparency alone is not enough: by then the show/activate
-            // already happened. Turn it into a hide instead, so the outcome no longer depends
-            // on which side wins the race.
-            if (nCmdShow != SW_HIDE && IsCondemned(hWnd) && !AppRestored(hWnd))
-            {
-                Log("SHOWWINDOW hwnd=%p cmd=%d condemned=1 suppressed=1", hWnd, nCmdShow);
-                return g_showWindow(hWnd, SW_HIDE);
-            }
-
-            // Explorer may reset window styles while initializing. Re-apply transparency at the
-            // last moment before the window is actually shown.
-            if (IsTracked(hWnd))
-            {
-                BYTE alpha = 0;
-                DWORD flags = 0;
-                const bool read = GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) != FALSE;
-                const bool rehide = !AppRestored(hWnd);
-
-                Log("SHOWWINDOW hwnd=%p cmd=%d read=%d alpha=%d rehide=%d", hWnd, nCmdShow, read, alpha, rehide);
-                if (rehide)
-                    MakeTransparent(hWnd);
-            }
+            Log("%s hwnd=%p cmd=%d condemned=1 suppressed=1", api, hWnd, nCmdShow);
+            return SW_HIDE;
         }
 
-        return g_showWindow(hWnd, nCmdShow);
+        if (!IsTracked(hWnd)) return nCmdShow;
+
+        if (AppRestored(hWnd))
+        {
+            SetCloaked(hWnd, false);
+            Untrack(hWnd);
+            return nCmdShow;
+        }
+
+        MakeTransparent(hWnd);
+        if (!IsCloaked(hWnd))
+            SetCloaked(hWnd, true);
+
+        if (nCmdShow != SW_HIDE)
+            Log("%s hwnd=%p cmd=%d tracked=1 cloak=1", api, hWnd, nCmdShow);
+
+        return nCmdShow;
+    }
+
+    BOOL WINAPI HookShowWindow(HWND hWnd, int nCmdShow)
+    {
+        return g_showWindow(hWnd, FilterShow(hWnd, nCmdShow, "SHOWWINDOW"));
+    }
+
+    // ShowWindowAsync is a separate export; Explorer uses it on some code paths.
+    BOOL WINAPI HookShowWindowAsync(HWND hWnd, int nCmdShow)
+    {
+        return g_showWindowAsync(hWnd, FilterShow(hWnd, nCmdShow, "SHOWWINDOWASYNC"));
     }
 
     // Explorer does not show every window through ShowWindow: SetWindowPos(SWP_SHOWWINDOW) is
@@ -306,10 +349,21 @@ namespace
                 Log("SETWINDOWPOS hwnd=%p flags=0x%x condemned=1 suppressed=1", hWnd, uFlags);
                 uFlags = (uFlags & ~SWP_SHOWWINDOW) | SWP_HIDEWINDOW;
             }
-            else if (IsTracked(hWnd) && !AppRestored(hWnd))
+            else if (IsTracked(hWnd))
             {
-                Log("SETWINDOWPOS hwnd=%p flags=0x%x rehide=1", hWnd, uFlags);
-                MakeTransparent(hWnd);
+                if (AppRestored(hWnd))
+                {
+                    SetCloaked(hWnd, false);
+                    Untrack(hWnd);
+                }
+                else
+                {
+                    MakeTransparent(hWnd);
+                    if (!IsCloaked(hWnd))
+                        SetCloaked(hWnd, true);
+
+                    Log("SETWINDOWPOS hwnd=%p flags=0x%x tracked=1 cloak=1", hWnd, uFlags);
+                }
             }
         }
 
@@ -339,7 +393,14 @@ namespace
     {
         for (;;)
         {
-            Sleep(300);
+            bool anyTracked;
+            EnterCriticalSection(&g_trackLock);
+            anyTracked = !g_tracked.empty();
+            LeaveCriticalSection(&g_trackLock);
+
+            // Poll fast while a temporary window exists: Explorer can show it through paths we
+            // do not hook, and the animation starts within milliseconds.
+            Sleep(anyTracked ? 10 : 100);
 
             const bool alive = PolicyAlive();
 
@@ -361,8 +422,15 @@ namespace
                     continue;
                 }
 
-                if (ConsumeRelease(hWnd) || AppRestored(hWnd))
+                if (ConsumeRelease(hWnd))
                 {
+                    drop.push_back(hWnd);
+                    continue;
+                }
+
+                if (AppRestored(hWnd))
+                {
+                    SetCloaked(hWnd, false);
                     drop.push_back(hWnd);
                     continue;
                 }
@@ -382,13 +450,25 @@ namespace
                     continue;
                 }
 
-                // Explorer can strip WS_EX_LAYERED while initializing. Put it back before the
-                // window gets a chance to paint opaque. A successful read with alpha 0 needs
-                // nothing: the window is already invisible.
+                // Explorer may show the window through a path that bypasses our hooks (or strip
+                // its styles while initializing). The window may stay WS_VISIBLE; what matters
+                // is that it is never composed, so keep it transparent and cloaked.
                 BYTE alpha = 0;
                 DWORD flags = 0;
-                if (GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) == FALSE)
+                const bool transparent =
+                    GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &flags) != FALSE &&
+                    (flags & LWA_ALPHA) != 0 && alpha == 0;
+                if (!transparent)
+                {
+                    Log("WORKER hwnd=%p transparent=0 rehide=1", hWnd);
                     MakeTransparent(hWnd);
+                }
+
+                if (!IsCloaked(hWnd))
+                {
+                    Log("WORKER hwnd=%p cloak=0 rehide=1", hWnd);
+                    SetCloaked(hWnd, true);
+                }
             }
 
             if (!drop.empty())
@@ -409,6 +489,7 @@ namespace
             for (const HWND hWnd : reveal)
             {
                 if (!IsWindow(hWnd)) continue;
+                SetCloaked(hWnd, false);
                 SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
                 const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
                 if ((exStyle & WS_EX_NOACTIVATE) != 0)
@@ -463,6 +544,9 @@ namespace
         const MH_STATUS showStatus = MH_CreateHookApi(L"user32.dll", "ShowWindow",
             reinterpret_cast<LPVOID>(&HookShowWindow),
             reinterpret_cast<LPVOID*>(&g_showWindow));
+        const MH_STATUS showAsyncStatus = MH_CreateHookApi(L"user32.dll", "ShowWindowAsync",
+            reinterpret_cast<LPVOID>(&HookShowWindowAsync),
+            reinterpret_cast<LPVOID*>(&g_showWindowAsync));
         const MH_STATUS posStatus = MH_CreateHookApi(L"user32.dll", "SetWindowPos",
             reinterpret_cast<LPVOID>(&HookSetWindowPos),
             reinterpret_cast<LPVOID*>(&g_setWindowPos));
@@ -470,8 +554,8 @@ namespace
             reinterpret_cast<LPVOID>(&HookDestroyWindow),
             reinterpret_cast<LPVOID*>(&g_destroyWindow));
 
-        Log("INIT createHook=%d showHook=%d posHook=%d destroyHook=%d",
-            createStatus, showStatus, posStatus, destroyStatus);
+        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d",
+            createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
 
         // SetWindowPos and DestroyWindow widen coverage; neither may take the whole hook down

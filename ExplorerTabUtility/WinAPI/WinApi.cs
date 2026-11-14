@@ -65,6 +65,9 @@ public static class WinApi
     [DllImport("user32.dll")]
     public static extern bool IsIconic(nint handle);
 
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(nint handle);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetLayeredWindowAttributes(nint hwnd, out uint pcrKey, out byte pbAlpha, out uint pdwFlags);
 
