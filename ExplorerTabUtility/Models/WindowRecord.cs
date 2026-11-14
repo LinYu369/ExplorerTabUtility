@@ -14,6 +14,10 @@ public class WindowRecord(string location, nint handle = 0, string[]? selectedIt
     public long CreatedAt { get; set; } = Environment.TickCount;
     public bool Restore { get; set; } = restore;
 
+    // Only records created by the detach flow or by an explicit "open as window" action may
+    // keep a new window visible. A normal close/reopen must still be merged into a tab.
+    public bool KeepWindow { get; set; }
+
     [JsonIgnore] public string DisplayLocation => Uri.UnescapeDataString(Location.Replace(@"file:\\\", ""));
 
     [JsonConstructor]

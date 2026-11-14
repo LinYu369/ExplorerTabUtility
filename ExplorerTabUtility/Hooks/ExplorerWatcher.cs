@@ -292,7 +292,7 @@ public class ExplorerWatcher : IHook
 
         var location = _windowEntryDict[window].Value.Location ?? GetLocation(window);
         var selectedItems = GetSelectedItems(window);
-        var windowRecord = new WindowRecord(location, windowHandle, selectedItems);
+        var windowRecord = new WindowRecord(location, windowHandle, selectedItems) { KeepWindow = true };
 
         var currentWindows = WinApi.FindAllWindowsEx("CabinetWClass").ToArray();
         DiagLog.Write($"DETACH start window=0x{(long)windowHandle:X} tab=0x{(long)activeTabHandle:X} location={location} windows={currentWindows.Length}");
@@ -451,15 +451,16 @@ public class ExplorerWatcher : IHook
             // Check if it is a detached/reattached tab before deciding to hide or merge it.
             // A little extra margin: the fallback window can take a while to register on a busy system.
             var isRecentlyClosed = TryGetRecentlyClosedWindow(location, out var closedWindow, 3_000);
+            var keepAsWindow = isRecentlyClosed && closedWindow?.KeepWindow == true;
 
             // Check if this is a single tab window and there are other windows
             var shouldReopenAsTab = (_isForcingTabs || _reuseTabs) &&
-                                    !isRecentlyClosed &&
+                                    !keepAsWindow &&
                                     _windowEntryDict.Count > 1 &&
                                     hWnd != _mainWindowHandle &&
                                     Helper.GetAllExplorerTabs(hWnd).Take(2).Count() == 1;
 
-            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed}");
+            DiagLog.Write($"REG branch reopen={shouldReopenAsTab} recentlyClosed={isRecentlyClosed} keepWindow={keepAsWindow}");
 
             if (shouldReopenAsTab)
                 Helper.HideWindow(hWnd, SettingsManager.HaveThemeIssue);
@@ -616,6 +617,8 @@ public class ExplorerWatcher : IHook
                 // earlier (e.g. before a detach wait), and the window we are about to open must be
                 // recognized regardless of how long that took.
                 windowToOpen.CreatedAt = Environment.TickCount;
+                // This window is intentionally kept visible; a normal close/reopen is not.
+                windowToOpen.KeepWindow = true;
                 lock (_closedWindowsLock)
                     _closedWindows.Add(windowToOpen);
             }
@@ -746,18 +749,35 @@ public class ExplorerWatcher : IHook
             targetPidl = _shellPathComparer.GetPidlFromPath(location);
             lock (_closedWindowsLock)
             {
+                WindowRecord? newest = null;
+                WindowRecord? keepWindow = null;
+                var matches = new List<int>();
+
                 for (var i = _closedWindows.Count - 1; i >= 0; i--)
                 {
                     var record = _closedWindows[i];
-                    if (Environment.TickCount - record.CreatedAt > maxAge) break;
+                    if (Environment.TickCount - record.CreatedAt > maxAge) continue;
                     if (!_shellPathComparer.IsEquivalent(location, record.Location, targetPidl)) continue;
-                    _closedWindows.RemoveAt(i);
-                    closedWindow = record;
-                    return true;
+
+                    matches.Add(i);
+                    newest ??= record;
+                    if (record.KeepWindow)
+                        keepWindow ??= record;
                 }
+
+                if (newest == null)
+                {
+                    closedWindow = null;
+                    return false;
+                }
+
+                // A detach/reattach record wins over a duplicate normal-close record for the
+                // same location, otherwise the detached window would be merged back into a tab.
+                closedWindow = keepWindow ?? newest;
+                foreach (var index in matches)
+                    _closedWindows.RemoveAt(index);
+                return true;
             }
-            closedWindow = null;
-            return false;
         }
         finally
         {
