@@ -261,6 +261,8 @@ namespace
         if (found)
         {
             SetCloaked(hWnd, false);
+            // The app keeps this window; make sure a previous hide does not leave it transparent.
+            SetLayeredWindowAttributes(hWnd, 0, 255, LWA_ALPHA);
             Untrack(hWnd);
             // The window is meant to be used now, so let it take focus again.
             const LONG exStyle = GetWindowLongW(hWnd, GWL_EXSTYLE);
@@ -321,20 +323,43 @@ namespace
 
         if (hide && hWnd != nullptr)
         {
-            // Kill every visual trace before Explorer gets a chance to show the window: no
-            // content (layered alpha 0), no DWM composition, and no open animation (cloak).
-            MakeTransparent(hWnd);
-            const HRESULT cloakResult = SetCloaked(hWnd, true);
-            Log("CREATE cloak=0x%08X", cloakResult);
+            // The app's ShellWindows handler can run *inside* CreateWindowExW and decide on
+            // this window before we get here. If it already kept the window (visible/opaque) or
+            // condemned it for merging, hiding and tracking it now would undo that decision and
+            // leave a flashed window invisible forever.
+            const bool restored = AppRestored(hWnd);
+            const bool visible = IsWindowVisible(hWnd) != FALSE;
+            BYTE alpha = 0;
+            DWORD alphaFlags = 0;
+            const bool alphaRead =
+                GetLayeredWindowAttributes(hWnd, nullptr, &alpha, &alphaFlags) != FALSE;
+            const bool transparent =
+                alphaRead && (alphaFlags & LWA_ALPHA) != 0 && alpha == 0;
+            const bool condemned = IsCondemned(hWnd);
+            // A visible window with no alpha-0 layer was already released/shown by the app.
+            const bool keep = restored || condemned || (visible && !transparent);
+            if (keep)
+            {
+                Log("CREATE keep hwnd=%p visible=%d restored=%d transparent=%d condemned=%d",
+                    hWnd, visible, restored, transparent, condemned);
+            }
+            else
+            {
+                // Kill every visual trace before Explorer gets a chance to show the window: no
+                // content (layered alpha 0), no DWM composition, and no open animation (cloak).
+                MakeTransparent(hWnd);
+                const HRESULT cloakResult = SetCloaked(hWnd, true);
+                Log("CREATE cloak=0x%08X", cloakResult);
 
-            // A window created with WS_VISIBLE is already on its way to the screen; take it
-            // back before it can start the open animation.
-            if ((style & WS_VISIBLE) != 0)
-                g_showWindow(hWnd, SW_HIDE);
+                // A window created with WS_VISIBLE is already on its way to the screen; take it
+                // back before it can start the open animation.
+                if ((style & WS_VISIBLE) != 0)
+                    g_showWindow(hWnd, SW_HIDE);
 
-            EnterCriticalSection(&g_trackLock);
-            g_tracked.push_back(hWnd);
-            LeaveCriticalSection(&g_trackLock);
+                EnterCriticalSection(&g_trackLock);
+                g_tracked.push_back(hWnd);
+                LeaveCriticalSection(&g_trackLock);
+            }
         }
 
         return hWnd;
@@ -708,7 +733,7 @@ namespace
             reinterpret_cast<LPVOID>(&HookSetWindowPlacement),
             reinterpret_cast<LPVOID*>(&g_setWindowPlacement));
 
-        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d swlHook=%d swlpHook=%d swpHook=%d",
+        Log("INIT createHook=%d showHook=%d showAsyncHook=%d posHook=%d destroyHook=%d ntShowHook=%d ntPosHook=%d swlHook=%d swlpHook=%d swpHook=%d hookVersion=4",
             createStatus, showStatus, showAsyncStatus, posStatus, destroyStatus, ntShowStatus,
             ntPosStatus, swlStatus, swlpStatus, swpStatus);
         if (createStatus != MH_OK || showStatus != MH_OK) return 0;
